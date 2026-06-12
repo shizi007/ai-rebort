@@ -656,6 +656,11 @@ elseif(CONFIG_BOARD_TYPE_ATK_DNESP32S3_BOX3)
     set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
     set(BUILTIN_ICON_FONT font_awesome_20_4)
     set(DEFAULT_EMOJI_COLLECTION twemoji_64)
+elseif(CONFIG_BOARD_TYPE_ATK_DNESP32S3_TRACKER)
+    set(BOARD_TYPE "atk-dnesp32s3-tracker")
+    set(BUILTIN_TEXT_FONT font_noto_basic_20_4)
+    set(BUILTIN_ICON_FONT font_awesome_20_4)
+    set(DEFAULT_EMOJI_COLLECTION noto-emoji_128)
 elseif(CONFIG_BOARD_TYPE_DU_CHATX)
     set(BOARD_TYPE "du-chatx")
     set(BUILTIN_TEXT_FONT font_puhui_basic_16_4)
@@ -997,6 +1002,7 @@ endif()
 if(CONFIG_IDF_TARGET_ESP32S3 OR CONFIG_IDF_TARGET_ESP32P4)
     list(APPEND SOURCES "boards/common/esp_video.cc"
                         "boards/common/rndis_board.cc"
+                        "boards/common/pan_tilt.cc"
                         )
 endif()
 
