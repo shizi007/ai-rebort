@@ -1,15 +1,19 @@
-/*
+﻿/*
  * 正点原子 ATK-DNESP32S3 WALL-E 瓦利机器人版
  * 
  * 基于基础版 atk_dnesp32s3，扩展为 WALL-E 机器人：
- *   - PCA9685 I2C 16路PWM驱动板（5个舵机 + 2路电机PWM）
+ *   - PCA9685 I2C 16路PWM驱动板（5个舵机 + 2路电机PWM + 2路眼睛灯PWM）
  *   - TB6612 双路直流电机驱动（2个N20减速电机，履带行走）
  *   - PanTilt 云台（头部旋转 + 颈部俯仰，PCA9685 模式）
  *   - 双臂舵机控制（左臂 + 右臂）
- *   - PersonTracker 人物追踪器（拍照→AI分析→云台跟踪+底盘跟随）
- *   - 12 个 MCP 工具，支持语音控制
+ *   - 双眼 WS2812 RGB 灯珠（GPIO44 RMT驱动，全彩1600万色，呼吸/闪烁/颜色切换）
+ *   - VL53L0X 激光测距（I2C，精确距离控制，替代视觉估算）
+ *   - PersonTracker 人物追踪器（拍照→AI分析→云台跟踪+底盘跟随+激光测距）
+ *   - 外放喇叭（ES8388 OUT2→NS4150功放→喇叭）
+ *   - 统一供电（5V降压模块同时给 ESP32-S3 和电机供电）
+ *   - 16 个 MCP 工具，支持语音控制
  * 
- * 硬件：ATK-DNESP32S3 + OV2640 + PCA9685 + TB6612 + SG90×5 + N20×2
+ * 硬件：ATK-DNESP32S3 + OV2640 + PCA9685 + TB6612 + VL53L0X + NS4150 + SG90×5 + N20×2 + 喇叭 + WS2812×2
  * 
  * 舵机接线（PCA9685）：
  *   CH0 — 头部水平旋转 (Pan)
@@ -21,6 +25,16 @@
  * 电机接线（TB6612）：
  *   AIN1=GPIO2, AIN2=GPIO8, PWMA=PCA9685_CH5（左电机）
  *   BIN1=GPIO19, BIN2=GPIO20, PWMB=PCA9685_CH6（右电机）
+ * 
+ * 眼睛灯接线（WS2812）：
+ *   GPIO44 → WS2812 DIN → 左眼 → 右眼（级联2颗）
+ *   3.3V 供电，无需电平转换
+ * 
+ * 喇叭接线：
+ *   ES8388 OUT2 → NS4150 功放 → 喇叭（8Ω 1W）
+ * 
+ * 供电方案：
+ *   18650×2 (7.4V) → LM2596 5V/3A → ESP32-S3 + PCA9685 + TB6612 + NS4150
  */
 
 #include "wifi_board.h"
@@ -41,6 +55,7 @@
 #include <esp_lcd_panel_vendor.h>
 #include <driver/i2c_master.h>
 #include <driver/spi_common.h>
+#include <driver/rmt_tx.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <cJSON.h>
@@ -77,6 +92,264 @@ public:
     }
 };
 
+// ============ WALL-E 眼睛灯控制器（WS2812 RGB） ============
+class WalleEyes {
+public:
+    enum EyeMode {
+        kOff = 0,       // 关闭
+        kOn,            // 常亮
+        kBreathe,       // 呼吸灯
+        kBlink,         // 闪烁
+        kAngry,         // 生气（红色快速闪烁）
+        kSleepy,        // 困倦（慢呼吸）
+    };
+
+    struct Color {
+        uint8_t r, g, b;
+        Color() : r(0), g(0), b(0) {}
+        Color(uint8_t r_, uint8_t g_, uint8_t b_) : r(r_), g(g_), b(b_) {}
+        Color Scale(float factor) const {
+            return Color(
+                (uint8_t)std::clamp((int)(r * factor), 0, 255),
+                (uint8_t)std::clamp((int)(g * factor), 0, 255),
+                (uint8_t)std::clamp((int)(b * factor), 0, 255)
+            );
+        }
+        static Color WarmYellow()  { return Color(EYE_COLOR_DEFAULT_R, EYE_COLOR_DEFAULT_G, EYE_COLOR_DEFAULT_B); }
+        static Color Red()         { return Color(255, 0, 0); }
+        static Color Blue()        { return Color(50, 100, 255); }
+        static Color Green()       { return Color(0, 255, 100); }
+        static Color White()       { return Color(255, 255, 255); }
+        static Color Black()       { return Color(0, 0, 0); }
+    };
+
+    WalleEyes(gpio_num_t gpio) {
+        SetBrightness(EYE_BRIGHTNESS_DEFAULT);
+        color_ = Color::WarmYellow();
+        InitRmt(gpio);
+    }
+
+    ~WalleEyes() {
+        StopAnimation();
+        if (encoder_) {
+            rmt_del_encoder(encoder_);
+        }
+        if (rmt_chan_) {
+            rmt_del_channel(rmt_chan_);
+        }
+    }
+
+    void SetMode(EyeMode mode) {
+        mode_ = mode;
+        StopAnimation();
+
+        switch (mode) {
+            case kOff:
+                UpdateLeds(Color::Black(), Color::Black());
+                ESP_LOGI(TAG, "Eyes: OFF");
+                break;
+            case kOn:
+                UpdateLeds(color_.Scale(brightness_), color_.Scale(brightness_));
+                ESP_LOGI(TAG, "Eyes: ON (%.0f%%, RGB=%d,%d,%d)", brightness_ * 100, color_.r, color_.g, color_.b);
+                break;
+            case kBreathe:
+            case kSleepy:
+                StartAnimation(mode == kSleepy ? 4000 : 2000);
+                ESP_LOGI(TAG, "Eyes: %s", mode == kSleepy ? "SLEEPY" : "BREATHE");
+                break;
+            case kBlink:
+                StartAnimation(800);
+                ESP_LOGI(TAG, "Eyes: BLINK");
+                break;
+            case kAngry:
+                // 生气模式自动切红色
+                color_ = Color::Red();
+                StartAnimation(200);
+                ESP_LOGI(TAG, "Eyes: ANGRY (red)");
+                break;
+        }
+    }
+
+    void SetBrightness(float level) {
+        brightness_ = std::clamp(level, 0.0f, EYE_BRIGHTNESS_MAX);
+        if (mode_ == kOn) {
+            UpdateLeds(color_.Scale(brightness_), color_.Scale(brightness_));
+        }
+    }
+
+    /** 设置眼睛颜色（RGB） */
+    void SetColor(uint8_t r, uint8_t g, uint8_t b) {
+        color_ = Color(r, g, b);
+        if (mode_ == kOn) {
+            UpdateLeds(color_.Scale(brightness_), color_.Scale(brightness_));
+        }
+        ESP_LOGI(TAG, "Eyes color set: RGB(%d,%d,%d)", r, g, b);
+    }
+
+    void SetColor(Color c) {
+        color_ = c;
+        if (mode_ == kOn) {
+            UpdateLeds(color_.Scale(brightness_), color_.Scale(brightness_));
+        }
+    }
+
+    /** 单次眨眼动画 */
+    void BlinkOnce() {
+        Color saved = color_;
+        UpdateLeds(Color::Black(), Color::Black());
+        vTaskDelay(pdMS_TO_TICKS(100));
+        UpdateLeds(saved.Scale(brightness_), saved.Scale(brightness_));
+    }
+
+    /** 异步眨眼（不阻塞调用者） */
+    void BlinkOnceAsync() {
+        xTaskCreate([](void* arg) {
+            auto self = static_cast<WalleEyes*>(arg);
+            self->BlinkOnce();
+            vTaskDelete(NULL);
+        }, "blink", 1024, this, 3, nullptr);
+    }
+
+    EyeMode mode() const { return mode_; }
+    float brightness() const { return brightness_; }
+    Color color() const { return color_; }
+
+private:
+    /** 初始化 RMT 发射通道（WS2812 协议） */
+    void InitRmt(gpio_num_t gpio) {
+        rmt_tx_channel_config_t tx_cfg = {};
+        tx_cfg.gpio_num = gpio;
+        tx_cfg.clk_src = RMT_CLK_SRC_DEFAULT;
+        tx_cfg.resolution_hz = 10 * 1000 * 1000;  // 10MHz → 每tick 0.1μs
+        tx_cfg.mem_block_symbols = 64;
+        tx_cfg.trans_queue_depth = 4;
+        ESP_ERROR_CHECK(rmt_new_tx_channel(&tx_cfg, &rmt_chan_));
+        ESP_ERROR_CHECK(rmt_enable(rmt_chan_));
+
+        // copy_encoder: 直接拷贝预计算的 RMT 符号
+        rmt_copy_encoder_config_t enc_cfg = {};
+        ESP_ERROR_CHECK(rmt_new_copy_encoder(&enc_cfg, &encoder_));
+        ESP_LOGI(TAG, "WS2812 RMT initialized on GPIO%d", gpio);
+    }
+
+
+    /** 发送颜色数据到 WS2812 链 — 预计算符号后用 copy_encoder 发送 */
+    void Transmit(const uint8_t* grb_data, size_t len) {
+        // 预计算所有 RMT 符号
+        rmt_symbol_word_t symbols[256];
+        size_t sym_count = 0;
+
+        for (size_t i = 0; i < len; i++) {
+            uint8_t byte = grb_data[i];
+            for (int bit = 7; bit >= 0; bit--) {
+                bool one = byte & (1 << bit);
+                symbols[sym_count].level0 = 1;
+                symbols[sym_count].duration0 = one ? 9 : 3;
+                symbols[sym_count].level1 = 0;
+                symbols[sym_count].duration1 = one ? 3 : 9;
+                sym_count++;
+            }
+        }
+        // RESET 码
+        symbols[sym_count].level0 = 0;
+        symbols[sym_count].duration0 = 500;
+        symbols[sym_count].level1 = 0;
+        symbols[sym_count].duration1 = 0;
+        sym_count++;
+
+        rmt_transmit_config_t tx_cfg = {};
+        tx_cfg.loop_count = 0;
+        tx_cfg.flags.eot_level = 0;
+
+        rmt_transmit(rmt_chan_, encoder_, symbols, sym_count * sizeof(rmt_symbol_word_t), &tx_cfg);
+        rmt_tx_wait_all_done(rmt_chan_, 100);
+    }
+
+    /** 更新两只眼睛的颜色 */
+    void UpdateLeds(Color left, Color right) {
+        // WS2812 数据格式: GRB，级联 [LED0][LED1]
+        // LED0=左眼, LED1=右眼
+        uint8_t buf[6] = {
+            left.g, left.r, left.b,     // LED0 GRB
+            right.g, right.r, right.b   // LED1 GRB
+        };
+        Transmit(buf, sizeof(buf));
+        left_color_ = left;
+        right_color_ = right;
+    }
+
+    void StartAnimation(int period_ms) {
+        if (animating_) return;
+        animating_ = true;
+        anim_period_ms_ = period_ms;
+        xTaskCreate(AnimTaskFunc, "eye_anim", 2048, this, 3, &anim_task_);
+    }
+
+    void StopAnimation() {
+        animating_ = false;
+        if (anim_task_) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            anim_task_ = nullptr;
+        }
+    }
+
+    static void AnimTaskFunc(void* arg) {
+        auto self = static_cast<WalleEyes*>(arg);
+        self->AnimTask();
+    }
+
+    void AnimTask() {
+        int step = 0;
+        while (animating_) {
+            float t = (float)step / 40.0f;
+
+            switch (mode_) {
+                case kBreathe: {
+                    float val = brightness_ * (0.1f + 0.9f * (0.5f + 0.5f * sinf(t * 2.0f * 3.14159f)));
+                    UpdateLeds(color_.Scale(val), color_.Scale(val));
+                    break;
+                }
+                case kSleepy: {
+                    float val = brightness_ * (0.3f + 0.7f * (0.5f + 0.5f * sinf(t * 2.0f * 3.14159f)));
+                    UpdateLeds(color_.Scale(val), color_.Scale(val));
+                    break;
+                }
+                case kBlink: {
+                    bool on = (step % 20) < 12;
+                    UpdateLeds(on ? color_.Scale(brightness_) : Color::Black(),
+                               on ? color_.Scale(brightness_) : Color::Black());
+                    break;
+                }
+                case kAngry: {
+                    bool on = (step % 6) < 4;
+                    Color angry_color = on ? Color::Red().Scale(brightness_) : Color::Red().Scale(0.05f);
+                    UpdateLeds(angry_color, angry_color);
+                    break;
+                }
+                default:
+                    animating_ = false;
+                    break;
+            }
+
+            step = (step + 1) % 40;
+            vTaskDelay(pdMS_TO_TICKS(anim_period_ms_ / 40));
+        }
+        anim_task_ = nullptr;
+        vTaskDelete(NULL);
+    }
+
+    rmt_channel_handle_t rmt_chan_ = nullptr;
+    rmt_encoder_handle_t encoder_ = nullptr;
+    EyeMode mode_ = kOn;
+    float brightness_ = EYE_BRIGHTNESS_DEFAULT;
+    Color color_;
+    Color left_color_;
+    Color right_color_;
+    bool animating_ = false;
+    int anim_period_ms_ = 2000;
+    TaskHandle_t anim_task_ = nullptr;
+};
+
 // ============ WALL-E 表情控制器 ============
 class WalleExpression {
 public:
@@ -89,8 +362,8 @@ public:
         kWave,           // 挥手
     };
 
-    WalleExpression(PCA9685* pca)
-        : pca_(pca) {
+    WalleExpression(PCA9685* pca, WalleEyes* eyes)
+        : pca_(pca), eyes_(eyes) {
         // 初始化到默认姿态
         SetArmLeft(ARM_LEFT_CENTER);
         SetArmRight(ARM_RIGHT_CENTER);
@@ -98,6 +371,19 @@ public:
 
     void SetExpression(Expression expr) {
         current_expr_ = expr;
+        // 眼睛联动（颜色+模式）
+        if (eyes_) {
+            switch (expr) {
+                case kHappy:   eyes_->SetColor(WalleEyes::Color::WarmYellow()); eyes_->SetMode(WalleEyes::kOn); eyes_->SetBrightness(1.0f); break;
+                case kSad:     eyes_->SetColor(WalleEyes::Color::Blue()); eyes_->SetMode(WalleEyes::kSleepy); eyes_->SetBrightness(0.4f); break;
+                case kCurious: eyes_->SetColor(WalleEyes::Color::Green()); eyes_->BlinkOnceAsync(); eyes_->SetMode(WalleEyes::kOn); eyes_->SetBrightness(0.8f); break;
+                case kScared:  eyes_->SetColor(WalleEyes::Color::White()); eyes_->SetMode(WalleEyes::kBlink); eyes_->SetBrightness(1.0f); break;
+                case kWave:    eyes_->SetColor(WalleEyes::Color::WarmYellow()); eyes_->SetMode(WalleEyes::kOn); eyes_->SetBrightness(0.8f); break;
+                case kNeutral:
+                default:       eyes_->SetColor(WalleEyes::Color::WarmYellow()); eyes_->SetMode(WalleEyes::kOn); eyes_->SetBrightness(EYE_BRIGHTNESS_DEFAULT); break;
+            }
+        }
+        // 手臂联动
         switch (expr) {
             case kHappy:
                 SetArmLeft(40.0f);    // 左臂举起
@@ -183,6 +469,7 @@ private:
     }
 
     PCA9685* pca_;
+    WalleEyes* eyes_;
     Expression current_expr_ = kNeutral;
     float left_arm_angle_ = ARM_LEFT_CENTER;
     float right_arm_angle_ = ARM_RIGHT_CENTER;
@@ -190,7 +477,129 @@ private:
     TaskHandle_t wave_task_ = nullptr;
 };
 
-// ============ 人物追踪器（WALL-E 增强：云台+底盘跟随） ============
+// ============ VL53L0X 激光测距传感器 ============
+class VL53L0X {
+public:
+    VL53L0X(i2c_master_bus_handle_t i2c_bus, uint8_t addr = VL53L0X_I2C_ADDR)
+        : i2c_bus_(i2c_bus), addr_(addr), last_distance_mm_(0), initialized_(false) {}
+
+    bool Init() {
+        // 检测设备是否在线：读取 VL53L0X 标识寄存器 0x00C0
+        // 期望值: 0xEEAA (VL53L0X identification)
+        uint8_t id_buf[2] = {0xC0, 0x00};
+        uint8_t data[2] = {0};
+        i2c_device_config_t dev_cfg = {
+            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+            .device_address = addr_,
+            .scl_speed_hz = 400000,
+        };
+        i2c_master_bus_add_device(i2c_bus_, &dev_cfg, &i2c_dev_);
+
+        // 读取 WHO_AM_I 寄存器
+        esp_err_t ret = i2c_master_transmit_receive(
+            i2c_dev_, id_buf, 2, data, 2, 100);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "VL53L0X not detected at 0x%02X", addr_);
+            return false;
+        }
+
+        uint16_t model_id = (data[0] << 8) | data[1];
+        if (model_id != 0xEEAA) {
+            ESP_LOGW(TAG, "VL53L0X unexpected model ID: 0x%04X", model_id);
+            return false;
+        }
+
+        // 初始化序列：设置信号速率、VCSEL 脉冲周期、测量预算
+        // 简化初始化 — 写入必要寄存器使传感器进入测距模式
+        WriteReg16(0x0080, 0x0001);  // SYSRANGE_START bit0=1 (单次测距)
+        WriteReg16(0x0083, 0x0004);  // SYSTEM_INTERRUPT_CONFIG_GPIO = 4 (new sample ready)
+
+        initialized_ = true;
+        ESP_LOGI(TAG, "VL53L0X initialized at I2C 0x%02X", addr_);
+        return true;
+    }
+
+    /** 读取距离（毫米），失败返回 -1 */
+    int ReadDistanceMm() {
+        if (!initialized_) return -1;
+
+        // 启动单次测距
+        WriteReg16(0x0018, 0x0001);
+
+        // 等待测量完成（轮询方式，最大 30ms）
+        bool ready = false;
+        for (int i = 0; i < 30; i++) {
+            uint8_t status = 0;
+            ReadReg8(0x0013, &status);  // RESULT_INTERRUPT_STATUS
+            if (status & 0x07) { ready = true; break; }
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+
+        if (!ready) {
+            ESP_LOGD(TAG, "VL53L0X measurement timeout");
+            return last_distance_mm_;
+        }
+
+        // 读取结果
+        uint8_t dist_buf[2] = {0};
+        uint8_t reg_buf[2] = {0x00, 0x1E};
+        esp_err_t ret = i2c_master_transmit_receive(
+            i2c_dev_, reg_buf, 2, dist_buf, 2, 100);
+        if (ret != ESP_OK) return last_distance_mm_;
+
+        int distance = (dist_buf[0] << 8) | dist_buf[1];
+
+        // 清除中断标志
+        WriteReg16(0x0015, 0x0001);  // SYSTEM_INTERRUPT_CLEAR
+
+        if (distance > VL53L0X_MAX_RANGE_MM || distance < VL53L0X_MIN_RANGE_MM) {
+            // 超出有效范围
+            return last_distance_mm_;
+        }
+
+        last_distance_mm_ = distance;
+        return distance;
+    }
+
+    /** 带中值滤波的读取（3次采样取中值，抗干扰） */
+    int ReadDistanceMmFiltered() {
+        int d1 = ReadDistanceMm();
+        vTaskDelay(pdMS_TO_TICKS(5));
+        int d2 = ReadDistanceMm();
+        vTaskDelay(pdMS_TO_TICKS(5));
+        int d3 = ReadDistanceMm();
+        // 三值取中
+        if (d1 > d2) std::swap(d1, d2);
+        if (d2 > d3) std::swap(d2, d3);
+        if (d1 > d2) std::swap(d1, d2);
+        return d2;
+    }
+
+    bool IsInitialized() const { return initialized_; }
+    int last_distance_mm() const { return last_distance_mm_; }
+
+private:
+    void WriteReg16(uint16_t reg, uint16_t val) {
+        uint8_t buf[4] = {
+            (uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF),
+            (uint8_t)(val >> 8), (uint8_t)(val & 0xFF)
+        };
+        i2c_master_transmit(i2c_dev_, buf, 4, 100);
+    }
+
+    void ReadReg8(uint16_t reg, uint8_t* out) {
+        uint8_t reg_buf[2] = {(uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF)};
+        i2c_master_transmit_receive(i2c_dev_, reg_buf, 2, out, 1, 100);
+    }
+
+    i2c_master_bus_handle_t i2c_bus_;
+    i2c_master_dev_handle_t i2c_dev_ = nullptr;
+    uint8_t addr_;
+    int last_distance_mm_ = 0;
+    bool initialized_ = false;
+};
+
+// ============ 人物追踪器（WALL-E 增强：云台+底盘跟随+激光测距） ============
 class PersonTracker {
 public:
     struct TrackResult {
@@ -198,16 +607,17 @@ public:
         float center_x = 0.5f;
         float center_y = 0.5f;
         float confidence = 0.0f;
+        int distance_mm = -1;  // VL53L0X 测距结果，-1=不可用
     };
 
-    PersonTracker(PanTilt* pan_tilt, Camera* camera, TB6612* motor, PCA9685* pca)
-        : pan_tilt_(pan_tilt), camera_(camera), motor_(motor), pca_(pca) {}
+    PersonTracker(PanTilt* pan_tilt, Camera* camera, TB6612* motor, PCA9685* pca, VL53L0X* tof)
+        : pan_tilt_(pan_tilt), camera_(camera), motor_(motor), pca_(pca), tof_(tof) {}
 
     ~PersonTracker() {
         StopTracking();
     }
 
-    /** 单次追踪：拍照 → AI分析 → 驱动云台+底盘 */
+    /** 单次追踪：拍照 → AI分析 → 测距 → 驱动云台+底盘 */
     bool TrackOnce() {
         if (!camera_->Capture()) {
             ESP_LOGE(TAG, "Camera capture failed");
@@ -226,12 +636,18 @@ public:
         auto result_str = camera_->Explain(question);
         auto track_result = ParseTrackResult(result_str);
 
+        // 读取 VL53L0X 测距（如果可用）
+        if (tof_ && tof_->IsInitialized()) {
+            track_result.distance_mm = tof_->ReadDistanceMmFiltered();
+            ESP_LOGI(TAG, "VL53L0X distance: %d mm", track_result.distance_mm);
+        }
+
         if (track_result.person_found && track_result.confidence > 0.3f) {
             AdjustPanTilt(track_result);
             AdjustChassis(track_result);
-            ESP_LOGI(TAG, "Person at (%.2f, %.2f), conf=%.2f, pan=%.1f°, tilt=%.1f°",
+            ESP_LOGI(TAG, "Person at (%.2f, %.2f), conf=%.2f, dist=%dmm, pan=%.1f°, tilt=%.1f°",
                      track_result.center_x, track_result.center_y,
-                     track_result.confidence,
+                     track_result.confidence, track_result.distance_mm,
                      pan_tilt_->pan_angle(), pan_tilt_->tilt_angle());
         } else {
             ESP_LOGI(TAG, "No person detected");
@@ -356,47 +772,69 @@ private:
         pan_tilt_->TiltBy(tilt_delta);
     }
 
-    /** 根据人物位置驱动底盘跟随（人在画面边缘时转向，人在中心附近时前进） */
+    /** 根据人物位置+激光测距驱动底盘跟随 */
     void AdjustChassis(const TrackResult& result) {
         float dx = result.center_x - 0.5f;  // 水平偏移
-        float dy = result.center_y - 0.5f;  // 垂直偏移（人在下方=离得近）
 
         float left_speed = 0;
         float right_speed = 0;
 
-        // 差速控制：人在左边 → 左轮慢、右轮快（左转）
-        //           人在右边 → 左轮快、右轮慢（右转）
+        // ======= 距离控制（优先使用 VL53L0X 激光测距） =======
+        float base_speed = follow_speed_;  // 默认速度
+
+        if (result.distance_mm > 0) {
+            // 有激光测距数据 — 精确距离控制
+            if (result.distance_mm < TRACK_TOO_CLOSE_MM) {
+                // 太近！停止或后退
+                base_speed = 0.0f;
+                ESP_LOGD(TAG, "Too close: %dmm, stopping", result.distance_mm);
+            } else if (result.distance_mm < TRACK_FOLLOW_DIST_MM - TRACK_DIST_TOLERANCE_MM) {
+                // 偏近，慢速跟随
+                base_speed = follow_speed_ * 0.3f;
+            } else if (result.distance_mm > TRACK_TOO_FAR_MM) {
+                // 太远，加速追
+                base_speed = follow_speed_ * 1.3f;
+                ESP_LOGD(TAG, "Too far: %dmm, speeding up", result.distance_mm);
+            } else if (result.distance_mm > TRACK_FOLLOW_DIST_MM + TRACK_DIST_TOLERANCE_MM) {
+                // 偏远，正常速度
+                base_speed = follow_speed_;
+            } else {
+                // 距离合适，低速维持
+                base_speed = follow_speed_ * 0.15f;
+            }
+        } else {
+            // 无激光测距 — 回退到视觉估算（兼容无 VL53L0X 的情况）
+            float dy = result.center_y - 0.5f;
+            if (std::abs(dx) < 0.15f && dy > 0.2f) {
+                base_speed = follow_speed_ * 0.3f;  // 人在画面下方≈近
+            }
+            if (std::abs(dx) < 0.15f && dy < -0.15f) {
+                base_speed = follow_speed_ * 1.3f;  // 人在画面上方≈远
+            }
+        }
+
+        // ======= 差速转向控制 =======
         float turn_factor = dx * 1.5f;  // 转向系数
 
-        left_speed = follow_speed_ - turn_factor * follow_speed_;
-        right_speed = follow_speed_ + turn_factor * follow_speed_;
+        left_speed = base_speed - turn_factor * follow_speed_;
+        right_speed = base_speed + turn_factor * follow_speed_;
 
         // 限制范围
         left_speed = std::clamp(left_speed, -1.0f, 1.0f);
         right_speed = std::clamp(right_speed, -1.0f, 1.0f);
 
-        // 人物在画面中心且偏下（较近），减速
-        if (std::abs(dx) < 0.15f && dy > 0.2f) {
-            left_speed *= 0.3f;
-            right_speed *= 0.3f;
-        }
-
-        // 人物在画面中心且偏上（较远），加速
-        if (std::abs(dx) < 0.15f && dy < -0.15f) {
-            left_speed = std::min(left_speed * 1.3f, 1.0f);
-            right_speed = std::min(right_speed * 1.3f, 1.0f);
-        }
-
         motor_->SetMotorA(pca_, left_speed);
         motor_->SetMotorB(pca_, right_speed);
 
-        ESP_LOGD(TAG, "Chassis: L=%.2f, R=%.2f", left_speed, right_speed);
+        ESP_LOGD(TAG, "Chassis: L=%.2f, R=%.2f, dist=%dmm",
+                 left_speed, right_speed, result.distance_mm);
     }
 
     PanTilt* pan_tilt_;
     Camera* camera_;
     TB6612* motor_;
     PCA9685* pca_;
+    VL53L0X* tof_;
     bool tracking_ = false;
     int tracking_interval_ms_ = 2000;
     int no_person_count_ = 0;
@@ -420,6 +858,8 @@ private:
     TB6612* motor_driver_;
     PanTilt* pan_tilt_;
     WalleExpression* expression_;
+    WalleEyes* eyes_;
+    VL53L0X* tof_;
     PersonTracker* tracker_;
 
     void InitializeI2c() {
@@ -597,14 +1037,32 @@ private:
 
     /** 初始化 WALL-E 表情控制 */
     void InitializeExpression() {
-        expression_ = new WalleExpression(pca9685_);
+        // 先初始化眼睛（Expression 需要联动眼睛）
+        InitializeEyes();
+        expression_ = new WalleExpression(pca9685_, eyes_);
         ESP_LOGI(TAG, "WALLE-Expression initialized");
+    }
+
+    /** 初始化 WALL-E 眼睛灯（WS2812 RGB） */
+    void InitializeEyes() {
+        eyes_ = new WalleEyes(WS2812_GPIO);
+        eyes_->SetMode(WalleEyes::kOn);  // 开机亮眼（暖黄色）
+        ESP_LOGI(TAG, "WALLE-Eyes initialized (WS2812 on GPIO%d, %d LEDs)", WS2812_GPIO, WS2812_LED_COUNT);
+    }
+
+    /** 初始化 VL53L0X 激光测距传感器 */
+    void InitializeToF() {
+        tof_ = new VL53L0X(i2c_bus_, VL53L0X_I2C_ADDR);
+        bool ok = tof_->Init();
+        if (!ok) {
+            ESP_LOGW(TAG, "VL53L0X init failed — distance tracking disabled, falling back to visual-only");
+        }
     }
 
     /** 初始化人物追踪器 */
     void InitializeTracker() {
-        tracker_ = new PersonTracker(pan_tilt_, camera_, motor_driver_, pca9685_);
-        ESP_LOGI(TAG, "PersonTracker initialized");
+        tracker_ = new PersonTracker(pan_tilt_, camera_, motor_driver_, pca9685_, tof_);
+        ESP_LOGI(TAG, "PersonTracker initialized (ToF=%s)", tof_->IsInitialized() ? "YES" : "NO");
     }
 
     /** 注册 MCP 工具，支持语音控制 */
@@ -684,7 +1142,7 @@ private:
             });
 
         mcp.AddTool("self.tracker.check",
-            "拍照检查当前画面中是否有人，返回人物位置信息。",
+            "拍照检查当前画面中是否有人，返回人物位置和距离信息。",
             PropertyList(),
             [this](const PropertyList& props) -> ReturnValue {
                 bool found = tracker_->TrackOnce();
@@ -694,6 +1152,7 @@ private:
                 cJSON_AddNumberToObject(json, "center_x", r.center_x);
                 cJSON_AddNumberToObject(json, "center_y", r.center_y);
                 cJSON_AddNumberToObject(json, "confidence", r.confidence);
+                cJSON_AddNumberToObject(json, "distance_mm", r.distance_mm);
                 return json;
             });
 
@@ -749,7 +1208,54 @@ private:
                 return true;
             });
 
-        ESP_LOGI(TAG, "MCP tools registered (13 WALL-E tools)");
+        // ============ 眼睛灯控制（4个） ============
+
+        mcp.AddTool("self.eyes.set_mode",
+            "设置WALL-E眼睛灯模式。0=关闭，1=常亮，2=呼吸灯，3=闪烁，4=生气(红色快速闪烁)，5=困倦(慢呼吸)。",
+            PropertyList({
+                Property("mode", kPropertyTypeInteger, 1, 0, 5)
+            }),
+            [this](const PropertyList& props) -> ReturnValue {
+                int mode = props["mode"].value<int>();
+                eyes_->SetMode(static_cast<WalleEyes::EyeMode>(mode));
+                return true;
+            });
+
+        mcp.AddTool("self.eyes.set_brightness",
+            "设置WALL-E眼睛亮度。0=最暗，100=最亮。",
+            PropertyList({
+                Property("brightness", kPropertyTypeInteger, 60, 0, 100)
+            }),
+            [this](const PropertyList& props) -> ReturnValue {
+                int val = props["brightness"].value<int>();
+                eyes_->SetBrightness(val / 100.0f);
+                return true;
+            });
+
+        mcp.AddTool("self.eyes.set_color",
+            "设置WALL-E眼睛颜色。RGB格式，每个通道0-255。默认暖黄色(255,200,80)。",
+            PropertyList({
+                Property("r", kPropertyTypeInteger, 255, 0, 255),
+                Property("g", kPropertyTypeInteger, 200, 0, 255),
+                Property("b", kPropertyTypeInteger, 80, 0, 255)
+            }),
+            [this](const PropertyList& props) -> ReturnValue {
+                int r = props["r"].value<int>();
+                int g = props["g"].value<int>();
+                int b = props["b"].value<int>();
+                eyes_->SetColor((uint8_t)r, (uint8_t)g, (uint8_t)b);
+                return true;
+            });
+
+        mcp.AddTool("self.eyes.blink",
+            "WALL-E眨眼。",
+            PropertyList(),
+            [this](const PropertyList& props) -> ReturnValue {
+                eyes_->BlinkOnceAsync();
+                return true;
+            });
+
+        ESP_LOGI(TAG, "MCP tools registered (17 WALL-E tools)");
     }
 
 public:
@@ -762,6 +1268,8 @@ public:
         , motor_driver_(nullptr)
         , pan_tilt_(nullptr)
         , expression_(nullptr)
+        , eyes_(nullptr)
+        , tof_(nullptr)
         , tracker_(nullptr) {
 
         InitializeI2c();
@@ -773,6 +1281,8 @@ public:
         InitializeMotor();
         InitializePanTilt();
         InitializeExpression();
+        // InitializeEyes() 已在 InitializeExpression() 内部调用
+        InitializeToF();
         InitializeTracker();
         InitializeTools();
     }

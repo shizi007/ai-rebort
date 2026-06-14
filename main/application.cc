@@ -9,6 +9,8 @@
 #include "mcp_server.h"
 #include "assets.h"
 #include "settings.h"
+#include "walle_debug_server.h"
+#include <esp_netif.h>
 
 #include <cstring>
 #include <esp_log.h>
@@ -260,6 +262,23 @@ void Application::Run() {
 
 void Application::HandleNetworkConnectedEvent() {
     ESP_LOGI(TAG, "Network connected");
+
+    // Display local IP address
+    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("STA_DEF");
+    if (netif) {
+        esp_netif_ip_info_t ip_info;
+        esp_err_t err = esp_netif_get_ip_info(netif, &ip_info);
+        if (err == ESP_OK) {
+            char ip_str[16];
+            esp_ip4addr_ntoa(&ip_info.ip, ip_str, sizeof(ip_str));
+            ESP_LOGI(TAG, "-----------------------------------------");
+            ESP_LOGI(TAG, "  WALL-E is online!");
+            ESP_LOGI(TAG, "  IP address: %s", ip_str);
+            ESP_LOGI(TAG, "  Debug URL: http://%s/debug", ip_str);
+            ESP_LOGI(TAG, "-----------------------------------------");
+        }
+    }
+
     auto state = GetDeviceState();
 
     if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
@@ -276,6 +295,18 @@ void Application::HandleNetworkConnectedEvent() {
             app->activation_task_handle_ = nullptr;
             vTaskDelete(NULL);
         }, "activation", 4096 * 2, this, 2, &activation_task_handle_);
+    }
+
+    // Start WALL-E debug server
+    static bool debug_server_started = false;
+    if (!debug_server_started) {
+        esp_err_t ret = walle_debug_server_start();
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "WALL-E debug server started");
+            debug_server_started = true;
+        } else {
+            ESP_LOGE(TAG, "Failed to start debug server: %d", ret);
+        }
     }
 
     // Update the status bar immediately to show the network state

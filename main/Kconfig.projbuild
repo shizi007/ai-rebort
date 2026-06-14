@@ -143,6 +143,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_BREAD_COMPACT_ESP32_LCD
         bool "Bread Compact ESP32 DevKit + LCD (面包板)"
         depends on IDF_TARGET_ESP32
+    config BOARD_TYPE_ATK_DNESP32S3_WALLE
+        bool "正点原子 DNESP32S3-WALL-E(瓦利机器人版)"
+        depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_XMINI_C3_V3
         bool "Xmini C3 V3"
         depends on IDF_TARGET_ESP32C3
@@ -466,12 +469,6 @@ choice BOARD_TYPE
         depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_ATK_DNESP32S3_BOX3
         bool "正点原子DNESP32S3-BOX3"
-        depends on IDF_TARGET_ESP32S3
-    config BOARD_TYPE_ATK_DNESP32S3_TRACKER
-        bool "正点原子DNESP32S3-Tracker(人物追踪版)"
-        depends on IDF_TARGET_ESP32S3
-    config BOARD_TYPE_ATK_DNESP32S3_WALLE
-        bool "正点原子DNESP32S3-WALL-E(瓦利机器人版)"
         depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_DU_CHATX
         bool "嘟嘟开发板CHATX(wifi)"

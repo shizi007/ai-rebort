@@ -86,6 +86,34 @@
 #define MOTOR_LEFT_PWM_CH       5
 #define MOTOR_RIGHT_PWM_CH      6
 
+// 眼睛灯 — WS2812 RGB 灯珠（GPIO44，RMT 驱动）
+// 使用 GPIO44 (U0TXD)，USB-CDC 模式下此引脚空闲
+// WS2812 供电 3.3V，级联 2 颗（左眼→右眼）
+#define WS2812_GPIO             GPIO_NUM_44
+#define WS2812_LED_COUNT        2       // 左眼 + 右眼
+
+// PCA9685 CH7/CH8 已释放（原 LED PWM 通道，现为空闲）
+#define PCA9685_CH7_FREE        7       // 空闲
+#define PCA9685_CH8_FREE        8       // 空闲
+
+// ============ VL53L0X 激光测距（I2C，与 ES8388/XL9555/PCA9685 共享总线） ============
+#define VL53L0X_I2C_ADDR           0x29    // 默认I2C地址，不与现有设备冲突
+#define VL53L0X_MAX_RANGE_MM       2000    // 最大测距 2000mm
+#define VL53L0X_MIN_RANGE_MM       30      // 最小测距 30mm
+#define TRACK_FOLLOW_DIST_MM       800.0f  // 跟随目标距离 800mm
+#define TRACK_DIST_TOLERANCE_MM    200.0f  // 距离容差 ±200mm
+#define TRACK_TOO_CLOSE_MM         400.0f  // 太近阈值 400mm
+#define TRACK_TOO_FAR_MM           1500.0f // 太远阈值 1500mm
+
+// ============ WS2812 眼睛灯参数 ============
+#define EYE_BRIGHTNESS_DEFAULT  0.6f     // 默认亮度 60%
+#define EYE_BRIGHTNESS_MAX      1.0f
+
+// WS2812 默认颜色（WALL-E 经典暖黄色）
+#define EYE_COLOR_DEFAULT_R     255
+#define EYE_COLOR_DEFAULT_G     200
+#define EYE_COLOR_DEFAULT_B     80
+
 // ============ TB6612 电机驱动引脚 ============
 // 使用空闲 GPIO，不与摄像头/I2S/LCD 冲突
 #define TB6612_AIN1_GPIO        GPIO_NUM_2     // 左电机方向1

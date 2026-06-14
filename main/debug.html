@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>WALL-E 调试</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+    #app { max-width: 600px; margin: 0 auto; padding: 10px; }
+    header {
+      background: linear-gradient(135deg, #16213e, #0f3460);
+      padding: 15px;
+      border-radius: 12px;
+      margin-bottom: 15px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    }
+    h1 { font-size: 1.3em; color: #f0a500; }
+    .status-dot {
+      width: 12px; height: 12px;
+      border-radius: 50%;
+      background: #4caf50;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    nav { display: flex; gap: 5px; margin-bottom: 15px; }
+    nav button {
+      flex: 1; padding: 10px;
+      background: #16213e;
+      color: #e0e0e0;
+      border: 2px solid #0f3460;
+      border-radius: 8px;
+      font-size: 0.95em;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s;
+    }
+    nav button.active { background: #f0a500; color: #1a1a2e; border-color: #f0a500; }
+    nav button:active { transform: scale(0.95); }
+    main { display: none; }
+    main.active { display: block; }
+    .card {
+      background: #16213e;
+      border-radius: 12px;
+      padding: 15px;
+      margin-bottom: 15px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    .card h2 {
+      font-size: 1.1em;
+      color: #f0a500;
+      margin-bottom: 12px;
+      border-bottom: 2px solid #0f3460;
+      padding-bottom: 8px;
+    }
+    .servo-control { margin-bottom: 15px; }
+    .servo-label {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 5px;
+      font-size: 0.9em;
+    }
+    .servo-value { color: #f0a500; font-weight: bold; }
+    input[type="range"] {
+      width: 100%; height: 8px;
+      -webkit-appearance: none;
+      appearance: none;
+      background: #0f3460;
+      border-radius: 4px;
+      outline: none;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 24px; height: 24px;
+      background: #f0a500;
+      border-radius: 50%;
+      cursor: pointer;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+    }
+    .btn-group {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .btn {
+      padding: 12px;
+      border: none;
+      border-radius: 8px;
+      font-size: 1em;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      touch-action: manipulation;
+    }
+    .btn:active { transform: scale(0.95); }
+    .btn-primary {
+      background: #0f3460;
+      color: #e0e0e0;
+      border: 2px solid #f0a500;
+    }
+    .btn-primary:active { background: #f0a500; color: #1a1a2e; }
+    .btn-stop {
+      background: #ff1744;
+      color: white;
+      font-size: 1.2em;
+      padding: 18px;
+      border-radius: 12px;
+      box-shadow: 0 4px 12px rgba(255,23,68,0.4);
+      width: 100%;
+      margin-top: 10px;
+    }
+    .speed-control { margin-top: 15px; }
+    .speed-label { display: flex; justify-content: space-between; margin-bottom: 5px; }
+    select {
+      width: 100%; padding: 10px;
+      background: #0f3460;
+      color: #e0e0e0;
+      border: 2px solid #f0a500;
+      border-radius: 8px;
+      font-size: 1em;
+      margin-top: 10px;
+    }
+    input[type="color"] {
+      width: 60px; height: 40px;
+      border: none; border-radius: 8px;
+      cursor: pointer; background: none;
+    }
+    .color-row {
+      display: flex; align-items: center;
+      gap: 15px; margin-bottom: 15px;
+    }
+    .color-row label { font-size: 0.9em; }
+    .expression-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    }
+    .expression-btn {
+      padding: 12px 8px;
+      background: #0f3460;
+      color: #e0e0e0;
+      border: 2px solid #f0a500;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.85em;
+      text-align: center;
+      transition: all 0.2s;
+    }
+    .expression-btn:active { background: #f0a500; color: #1a1a2e; transform: scale(0.95); }
+    .distance-display { text-align: center; padding: 20px; }
+    .distance-value {
+      font-size: 3em; font-weight: bold;
+      color: #f0a500; margin: 10px 0;
+    }
+    .distance-unit { font-size: 0.5em; color: #888; }
+    .progress-bar {
+      width: 100%; height: 20px;
+      background: #0f3460;
+      border-radius: 10px;
+      overflow: hidden; margin-top: 10px;
+    }
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #4caf50, #f0a500, #f44336);
+      transition: width 0.3s;
+    }
+    .info-row {
+      display: flex; justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid #0f3460;
+      font-size: 0.9em;
+    }
+    .info-label { color: #888; }
+    .info-value { color: #f0a500; font-weight: 500; }
+    .i2c-table {
+      width: 100%; border-collapse: collapse;
+      margin-top: 10px;
+    }
+    .i2c-table th, .i2c-table td {
+      padding: 8px; text-align: left;
+      border-bottom: 1px solid #0f3460;
+      font-size: 0.85em;
+    }
+    .i2c-table th { color: #f0a500; }
+    .btn-restart {
+      width: 100%; padding: 12px;
+      background: #ff9800;
+      color: #1a1a2e;
+      border: none; border-radius: 8px;
+      font-size: 1em; font-weight: 600;
+      cursor: pointer; margin-top: 15px;
+    }
+    .btn-restart:active { background: #f57c00; }
+    .toast {
+      position: fixed; bottom: 20px; left: 50%;
+      transform: translateX(-50%);
+      background: #323232; color: white;
+      padding: 12px 24px;
+      border-radius: 8px; font-size: 0.9em;
+      z-index: 1000; opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>🤖 WALL-E 调试控制台</h1>
+      <div class="status-dot" id="statusDot"></div>
+    </header>
+    
+    <nav>
+      <button class="active" onclick="switchTab('basic')">🔧 基础</button>
+      <button onclick="switchTab('display')">👁️ 显示</button>
+      <button onclick="switchTab('system')">⚙️ 系统</button>
+    </nav>
+    
+    <main id="tab-basic" class="active">
+      <div class="card">
+        <h2>🎯 舵机控制</h2>
+        <div class="servo-control">
+          <div class="servo-label"><span>脖子水平</span><span class="servo-value" id="servo0-val">90°</span></div>
+          <input type="range" min="0" max="180" value="90" oninput="updateServo(0, this.value)">
+        </div>
+        <div class="servo-control">
+          <div class="servo-label"><span>脖子俯仰</span><span class="servo-value" id="servo1-val">90°</span></div>
+          <input type="range" min="0" max="180" value="90" oninput="updateServo(1, this.value)">
+        </div>
+        <div class="servo-control">
+          <div class="servo-label"><span>头部</span><span class="servo-value" id="servo2-val">90°</span></div>
+          <input type="range" min="0" max="180" value="90" oninput="updateServo(2, this.value)">
+        </div>
+        <div class="servo-control">
+          <div class="servo-label"><span>左臂</span><span class="servo-value" id="servo3-val">90°</span></div>
+          <input type="range" min="0" max="180" value="90" oninput="updateServo(3, this.value)">
+        </div>
+        <div class="servo-control">
+          <div class="servo-label"><span>右臂</span><span class="servo-value" id="servo4-val">90°</span></div>
+          <input type="range" min="0" max="180" value="90" oninput="updateServo(4, this.value)">
+        </div>
+      </div>
+      
+      <div class="card">
+        <h2>🚗 电机控制</h2>
+        <div class="btn-group">
+          <button class="btn btn-primary" onmousedown="motorControl('forward')" onmouseup="motorControl('stop')" ontouchstart="motorControl('forward')" ontouchend="motorControl('stop')">⬆️ 前进</button>
+          <button class="btn btn-primary" onmousedown="motorControl('backward')" onmouseup="motorControl('stop')" ontouchstart="motorControl('backward')" ontouchend="motorControl('stop')">⬇️ 后退</button>
+          <button class="btn btn-primary" onmousedown="motorControl('left')" onmouseup="motorControl('stop')" ontouchstart="motorControl('left')" ontouchend="motorControl('stop')">⬅️ 左转</button>
+          <button class="btn btn-primary" onmousedown="motorControl('right')" onmouseup="motorControl('stop')" ontouchstart="motorControl('right')" ontouchend="motorControl('stop')">➡️ 右转</button>
+        </div>
+        <div class="speed-control">
+          <div class="speed-label"><span>速度</span><span id="speed-val">150</span></div>
+          <input type="range" min="0" max="255" value="150" id="speed-slider" oninput="document.getElementById('speed-val').textContent=this.value">
+        </div>
+      </div>
+      
+      <div class="card">
+        <button class="btn-stop" onclick="emergencyStop()">🛑 紧急停止</button>
+      </div>
+    </main>
+    
+    <main id="tab-display">
+      <div class="card">
+        <h2>👁️ 眼睛灯控制</h2>
+        <div class="color-row">
+          <label>颜色选择：</label>
+          <input type="color" value="#00ff00" id="eye-color">
+        </div>
+        <select id="eye-mode" onchange="updateEyes()">
+          <option value="breath">呼吸灯</option>
+          <option value="static">常亮</option>
+          <option value="blink">闪烁</option>
+          <option value="rainbow">彩虹</option>
+          <option value="chase">跑马灯</option>
+          <option value="off">关闭</option>
+        </select>
+      </div>
+      
+      <div class="card">
+        <h2>🎭 表情动画</h2>
+        <div class="expression-grid">
+          <button class="expression-btn" onclick="playExpression('happy')">😊 开心</button>
+          <button class="expression-btn" onclick="playExpression('sad')">😢 悲伤</button>
+          <button class="expression-btn" onclick="playExpression('surprised')">😲 惊讶</button>
+          <button class="expression-btn" onclick="playExpression('angry')">😠 生气</button>
+          <button class="expression-btn" onclick="playExpression('sleepy')">😴 困了</button>
+          <button class="expression-btn" onclick="playExpression('wave')">👋 挥手</button>
+        </div>
+      </div>
+      
+      <div class="card">
+        <h2>📏 激光测距</h2>
+        <div class="distance-display">
+          <div class="distance-value"><span id="distance-val">----</span><span class="distance-unit">mm</span></div>
+          <div class="progress-bar"><div class="progress-fill" id="distance-bar" style="width: 0%"></div></div>
+          <div style="font-size:0.8em;color:#888;margin-top:8px">有效范围: 30-2000mm</div>
+        </div>
+      </div>
+    </main>
+    
+    <main id="tab-system">
+      <div class="card">
+        <h2>📶 WiFi 状态</h2>
+        <div class="info-row"><span class="info-label">连接状态</span><span class="info-value" id="wifi-status">检测中...</span></div>
+        <div class="info-row"><span class="info-label">IP 地址</span><span class="info-value" id="wifi-ip">----</span></div>
+      </div>
+      
+      <div class="card">
+        <h2>🔌 I²C 设备扫描</h2>
+        <button class="btn btn-primary" onclick="scanI2C()" style="width:100%;margin-bottom:10px">扫描 I²C 总线</button>
+        <table class="i2c-table" id="i2c-table">
+          <thead><tr><th>地址</th><th>设备</th></tr></thead>
+          <tbody id="i2c-tbody"><tr><td colspan="2" style="text-align:center;color:#666">点击扫描按钮...</td></tr></tbody>
+        </table>
+      </div>
+      
+      <div class="card">
+        <h2>💻 系统信息</h2>
+        <div class="info-row"><span class="info-label">空闲堆内存</span><span class="info-value" id="heap-free">----</span></div>
+        <div class="info-row"><span class="info-label">CPU 温度</span><span class="info-value" id="cpu-temp">----</span></div>
+        <div class="info-row"><span class="info-label">运行时间</span><span class="info-value" id="uptime">----</span></div>
+      </div>
+      
+      <div class="card">
+        <button class="btn-restart" onclick="restartSystem()">🔄 重启系统</button>
+      </div>
+    </main>
+  </div>
+  
+  <div class="toast" id="toast"></div>
+  
+  <script>
+    function switchTab(tab) {
+      document.querySelectorAll('main').forEach(m => m.classList.remove('active'));
+      document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+      document.getElementById('tab-' + tab).classList.add('active');
+      event.target.classList.add('active');
+    }
+    
+    function showToast(msg) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.classList.add('show');
+      setTimeout(() => t.classList.remove('show'), 2000);
+    }
+    
+    async function apiCall(path, method = 'GET', body = null) {
+      try {
+        const opts = { method, headers: { 'Content-Type': 'application/json' } };
+        if (body) opts.body = JSON.stringify(body);
+        const res = await fetch(path, opts);
+        return await res.json();
+      } catch (e) {
+        showToast('通信错误: ' + e.message);
+        return null;
+      }
+    }
+    
+    function updateServo(ch, angle) {
+      document.getElementById('servo' + ch + '-val').textContent = angle + '°';
+      apiCall('/api/servo', 'POST', { ch: parseInt(ch), angle: parseInt(angle) });
+    }
+    
+    function motorControl(dir) {
+      if (dir === 'stop') {
+        apiCall('/api/motor', 'POST', { left: 0, right: 0 });
+        return;
+      }
+      const speed = parseInt(document.getElementById('speed-slider').value);
+      let left = 0, right = 0;
+      switch(dir) {
+        case 'forward': left = right = speed; break;
+        case 'backward': left = right = -speed; break;
+        case 'left': left = -speed; right = speed; break;
+        case 'right': left = speed; right = -speed; break;
+      }
+      apiCall('/api/motor', 'POST', { left, right });
+    }
+    
+    async function emergencyStop() {
+      if (confirm('确定要紧急停止吗？\n所有电机和舵机将归中！')) {
+        const res = await apiCall('/api/stop', 'POST');
+        if (res && res.ok) {
+          showToast('✅ 已紧急停止');
+          for (let i = 0; i < 5; i++) {
+            document.querySelectorAll('input[type="range"]')[i].value = 90;
+            document.getElementById('servo' + i + '-val').textContent = '90°';
+          }
+        }
+      }
+    }
+    
+    function updateEyes() {
+      const color = document.getElementById('eye-color').value;
+      const mode = document.getElementById('eye-mode').value;
+      apiCall('/api/eyes', 'POST', { mode, color });
+    }
+    document.getElementById('eye-color').addEventListener('change', updateEyes);
+    
+    function playExpression(action) {
+      apiCall('/api/expression', 'POST', { action });
+      showToast('播放表情: ' + action);
+    }
+    
+    async function scanI2C() {
+      const tbody = document.getElementById('i2c-tbody');
+      tbody.innerHTML = '<tr><td colspan="2" style="text-align:center">扫描中...</td></tr>';
+      const res = await apiCall('/api/i2c_scan');
+      if (res && res.devices) {
+        if (res.devices.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="2" style="text-align:center;color:#666">未检测到设备</td></tr>';
+        } else {
+          const devMap = { '0x40':'PCA9685舵机', '0x29':'VL53L0X测距', '0x68':'MPU6050陀螺仪', '0x76':'BME280传感器' };
+          tbody.innerHTML = res.devices.map(d => 
+            '<tr><td>' + d + '</td><td>' + (devMap[d] || '未知设备') + '</td></tr>'
+          ).join('');
+        }
+      }
+    }
+    
+    function restartSystem() {
+      if (confirm('确定要重启 WALL-E 吗？')) {
+        apiCall('/api/restart', 'POST');
+        showToast('正在重启...');
+      }
+    }
+    
+    async function refreshStatus() {
+      const res = await apiCall('/api/status');
+      if (!res) return;
+      document.getElementById('wifi-status').textContent = res.wifi_connected ? '✅ 已连接' : '❌ 未连接';
+      document.getElementById('wifi-ip').textContent = res.ip || '----';
+      if (res.heap_free) document.getElementById('heap-free').textContent = (res.heap_free / 1024).toFixed(1) + ' KB';
+      if (res.cpu_temp) document.getElementById('cpu-temp').textContent = res.cpu_temp.toFixed(1) + ' °C';
+      if (res.uptime) {
+        const s = res.uptime;
+        const h = Math.floor(s / 3600);
+        const m = Math.floor((s % 3600) / 60);
+        const sec = s % 60;
+        document.getElementById('uptime').textContent = h + '时' + m + '分' + sec + '秒';
+      }
+    }
+    
+    async function refreshDistance() {
+      const res = await apiCall('/api/distance');
+      if (res && res.distance_mm !== null && res.distance_mm > 0) {
+        const d = res.distance_mm;
+        document.getElementById('distance-val').textContent = d;
+        const pct = Math.min(100, (d / 2000) * 100);
+        document.getElementById('distance-bar').style.width = pct + '%';
+      } else {
+        document.getElementById('distance-val').textContent = '----';
+        document.getElementById('distance-bar').style.width = '0%';
+      }
+    }
+    
+    setInterval(() => { refreshStatus(); refreshDistance(); }, 2000);
+    refreshStatus();
+    refreshDistance();
+  </script>
+</body>
+</html>
