@@ -30,6 +30,7 @@ set(SOURCES "audio/audio_codec.cc"
             "protocols/mqtt_protocol.cc"
             "protocols/websocket_protocol.cc"
             "mcp_server.cc"
+            "music_player.cc"
             "system_info.cc"
             "application.cc"
             "ota.cc"
@@ -37,8 +38,12 @@ set(SOURCES "audio/audio_codec.cc"
             "device_state_machine.cc"
             "assets.cc"
             "main.cc"
-            "walle_debug_server.cc"
             )
+
+# walle_debug_server 仅用于 WALL-E 板型（依赖机器人硬件函数）
+if(CONFIG_BOARD_TYPE_ATK_DNESP32S3_WALLE)
+    list(APPEND SOURCES "walle_debug_server.cc")
+endif()
 
 set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols")
 
@@ -1036,6 +1041,7 @@ idf_component_register(SRCS ${SOURCES}
                         esp_driver_gpio
                         esp_driver_uart
                         esp_driver_spi
+                        espressif__esp_lcd_gc9a01
                         esp_driver_i2c
                         esp_driver_i2s
                         esp_driver_jpeg

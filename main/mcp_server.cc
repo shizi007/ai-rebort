@@ -17,6 +17,7 @@
 #include "settings.h"
 #include "lvgl_theme.h"
 #include "lvgl_display.h"
+#include "music_player.h"
 
 #define TAG "MCP"
 
@@ -120,6 +121,44 @@ void McpServer::AddCommonTools() {
             });
     }
 #endif
+
+    // ==================== 音乐播放 MCP 工具 ====================
+    // 服务端（云端）调用这些工具来管理设备端的音乐播放状态和显示
+
+    AddTool("media.music.set_status",
+        "更新音乐播放状态和当前曲目信息，用于在设备屏幕上显示歌曲信息。"
+        "服务端在开始播放音乐、切换歌曲、暂停/恢复时应调用此工具。",
+        PropertyList({
+            Property("title", kPropertyTypeString, ""),
+            Property("artist", kPropertyTypeString, ""),
+            Property("album", kPropertyTypeString, ""),
+            Property("state", kPropertyTypeString, "playing"),  // playing | paused | idle
+            Property("duration", kPropertyTypeInteger, 0, 0, 86400),
+            Property("position", kPropertyTypeInteger, 0, 0, 86400),
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto& player = MusicPlayer::GetInstance();
+            // 由于 MCP 工具的 PropertyList 不同于 cJSON，这里通过中间格式转换
+            // 为了简化，我们使用 cJSON 构造参数
+            cJSON* args = cJSON_CreateObject();
+            cJSON_AddStringToObject(args, "title", properties["title"].value<std::string>().c_str());
+            cJSON_AddStringToObject(args, "artist", properties["artist"].value<std::string>().c_str());
+            cJSON_AddStringToObject(args, "album", properties["album"].value<std::string>().c_str());
+            cJSON_AddStringToObject(args, "state", properties["state"].value<std::string>().c_str());
+            cJSON_AddNumberToObject(args, "duration", properties["duration"].value<int>());
+            cJSON_AddNumberToObject(args, "position", properties["position"].value<int>());
+            bool ok = player.SetStatus(args);
+            cJSON_Delete(args);
+            return ok;
+        });
+
+    AddTool("media.music.get_status",
+        "获取当前音乐播放状态，包括歌曲标题、艺术家、专辑、播放进度等。",
+        PropertyList(),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto& player = MusicPlayer::GetInstance();
+            return player.ToJson();
+        });
 
     // Restore the original tools list to the end of the tools list
     tools_.insert(tools_.end(), original_tools.begin(), original_tools.end());

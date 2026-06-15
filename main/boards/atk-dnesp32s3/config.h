@@ -19,7 +19,7 @@
 
 // ============ 按键/LED ============
 #define BOOT_BUTTON_GPIO  GPIO_NUM_0
-#define BUILTIN_LED_GPIO  GPIO_NUM_1
+#define BUILTIN_LED_GPIO  GPIO_NUM_NC  // GPIO1 已给 GC9A01 CS_RIGHT 用
 
 // ============ LCD 显示（ST7789 SPI） ============
 #define LCD_SCLK_PIN GPIO_NUM_12
@@ -73,9 +73,14 @@
 #define MOTOR_LEFT_PWM_CH     5
 #define MOTOR_RIGHT_PWM_CH    6
 
-// ============ WS2812 眼睛灯（GPIO44，RMT 驱动） ============
-#define WS2812_GPIO       GPIO_NUM_44
-#define WS2812_LED_COUNT  2
+// ============ GC9A01 圆形屏眼睛（共享主屏 SPI 总线，7针无BL） ============
+// 复用 LCD 的 SCLK(GPIO12) / MOSI(GPIO11) / DC(GPIO40)
+// 仅需两个独立 CS 引脚
+#define EYE_SPI_HOST       SPI2_HOST
+#define EYE_CS_LEFT        GPIO_NUM_44
+#define EYE_CS_RIGHT       GPIO_NUM_1
+#define EYE_RESOLUTION     240
+#define EYE_PCLK_HZ        (40 * 1000 * 1000)
 
 // ============ VL53L0X 激光测距 ============
 #define VL53L0X_I2C_ADDR           0x29
@@ -86,12 +91,13 @@
 #define TRACK_TOO_CLOSE_MM         400.0f
 #define TRACK_TOO_FAR_MM           1500.0f
 
-// ============ WS2812 眼睛灯参数 ============
-#define EYE_BRIGHTNESS_DEFAULT  0.6f
-#define EYE_BRIGHTNESS_MAX      1.0f
-#define EYE_COLOR_DEFAULT_R     255
-#define EYE_COLOR_DEFAULT_G     200
-#define EYE_COLOR_DEFAULT_B     80
+// ============ 眼睛渲染参数 ============
+#define EYE_IRIS_RADIUS         50
+#define EYE_PUPIL_RADIUS        20
+#define EYE_HIGHLIGHT_RADIUS    8
+#define EYE_LID_COLOR_R         40
+#define EYE_LID_COLOR_G         30
+#define EYE_LID_COLOR_B         20
 
 // ============ TB6612 电机驱动引脚 ============
 #define TB6612_AIN1_GPIO    GPIO_NUM_2

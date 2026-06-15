@@ -33,6 +33,9 @@ extern "C" {
     void walle_eyes_setBreath(uint8_t r, uint8_t g, uint8_t b);
     void walle_eyes_setBlink(uint8_t r, uint8_t g, uint8_t b);
     void walle_eyes_setRainbow();
+    void walle_eyes_setBrightness(float level);
+    void walle_eyes_setMode(const char* mode_str);
+    void walle_eyes_start();
     
     void walle_expression_playHappy();
     void walle_expression_playSad();
@@ -307,6 +310,7 @@ static esp_err_t eyes_handler(httpd_req_t *req) {
     
     cJSON *mode = cJSON_GetObjectItem(root, "mode");
     cJSON *color = cJSON_GetObjectItem(root, "color");
+    cJSON *brightness_json = cJSON_GetObjectItem(root, "brightness");
     
     if (!mode) {
         cJSON_Delete(root);
@@ -315,7 +319,7 @@ static esp_err_t eyes_handler(httpd_req_t *req) {
     }
     
     const char* mode_str = mode->valuestring;
-    const char* color_str = color ? color->valuestring : "#00ff00";
+    const char* color_str = color ? color->valuestring : "#ffaa00";
     
     // 解析颜色 (#RRGGBB -> RGB)
     uint32_t rgb = 0;
@@ -328,20 +332,40 @@ static esp_err_t eyes_handler(httpd_req_t *req) {
     uint8_t g = (rgb >> 8) & 0xFF;
     uint8_t b = rgb & 0xFF;
     
-    // 控制眼睛灯
-    if (strcmp(mode_str, "breath") == 0) {
+    // 处理亮度 (0.0~1.0)
+    float brightness = 0.6f;
+    if (brightness_json) {
+        brightness = (float)brightness_json->valuedouble;
+        if (brightness < 0.1f) brightness = 0.1f;
+        if (brightness > 1.0f) brightness = 1.0f;
+        walle_eyes_setBrightness(brightness);
+    }
+    
+    // 控制眼睛 TFT
+    if (strcmp(mode_str, "start") == 0) {
+        walle_eyes_start();  // GC9A01 延迟初始化
+    } else if (strcmp(mode_str, "breath") == 0) {
         walle_eyes_setBreath(r, g, b);
-    } else if (strcmp(mode_str, "static") == 0) {
-        walle_eyes_setColor(r, g, b);
+    } else if (strcmp(mode_str, "on") == 0) {
+        walle_eyes_setColor(r, g, b);  // SetColor + SetMode(kOn)
     } else if (strcmp(mode_str, "blink") == 0) {
         walle_eyes_setBlink(r, g, b);
+    } else if (strcmp(mode_str, "angry") == 0) {
+        walle_eyes_setColor(r, g, b);
+        walle_eyes_setMode("angry");
+    } else if (strcmp(mode_str, "sad") == 0) {
+        walle_eyes_setColor(r, g, b);
+        walle_eyes_setMode("sleepy");  // sad -> sleepy eyes
+    } else if (strcmp(mode_str, "sleepy") == 0) {
+        walle_eyes_setColor(r, g, b);
+        walle_eyes_setMode("sleepy");
     } else if (strcmp(mode_str, "rainbow") == 0) {
         walle_eyes_setRainbow();
     } else if (strcmp(mode_str, "off") == 0) {
         walle_eyes_turnOff();
     }
     
-    ESP_LOGI(TAG, "Eyes mode=%s color=#%02X%02X%02X", mode_str, r, g, b);
+    ESP_LOGI(TAG, "Eyes mode=%s color=#%02X%02X%02X brightness=%.2f", mode_str, r, g, b, (double)brightness);
     
     cJSON_Delete(root);
     

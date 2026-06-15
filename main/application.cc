@@ -9,7 +9,10 @@
 #include "mcp_server.h"
 #include "assets.h"
 #include "settings.h"
+#ifdef CONFIG_BOARD_TYPE_ATK_DNESP32S3_WALLE
 #include "walle_debug_server.h"
+#endif
+#include "music_player.h"
 #include <esp_netif.h>
 
 #include <cstring>
@@ -277,6 +280,21 @@ void Application::HandleNetworkConnectedEvent() {
             ESP_LOGI(TAG, "  Debug URL: http://%s/debug", ip_str);
             ESP_LOGI(TAG, "-----------------------------------------");
         }
+    } else {
+        // AP 配网模式：设备自己开热点
+        netif = esp_netif_get_handle_from_ifkey("AP_DEF");
+        if (netif) {
+            esp_netif_ip_info_t ip_info;
+            if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
+                char ip_str[16];
+                esp_ip4addr_ntoa(&ip_info.ip, ip_str, sizeof(ip_str));
+                ESP_LOGI(TAG, "-----------------------------------------");
+                ESP_LOGI(TAG, "  配网模式 (AP Mode)");
+                ESP_LOGI(TAG, "  手机连接此热点后访问:");
+                ESP_LOGI(TAG, "  Debug URL: http://%s", "192.168.4.1");
+                ESP_LOGI(TAG, "-----------------------------------------");
+            }
+        }
     }
 
     auto state = GetDeviceState();
@@ -297,7 +315,8 @@ void Application::HandleNetworkConnectedEvent() {
         }, "activation", 4096 * 2, this, 2, &activation_task_handle_);
     }
 
-    // Start WALL-E debug server
+    // Start WALL-E debug server (only for WALL-E board)
+#ifdef CONFIG_BOARD_TYPE_ATK_DNESP32S3_WALLE
     static bool debug_server_started = false;
     if (!debug_server_started) {
         esp_err_t ret = walle_debug_server_start();
@@ -308,6 +327,7 @@ void Application::HandleNetworkConnectedEvent() {
             ESP_LOGE(TAG, "Failed to start debug server: %d", ret);
         }
     }
+#endif
 
     // Update the status bar immediately to show the network state
     auto display = Board::GetInstance().GetDisplay();
@@ -632,6 +652,44 @@ void Application::InitializeProtocol() {
                 ESP_LOGW(TAG, "Invalid custom message format: missing payload");
             }
 #endif
+        } else if (strcmp(type->valuestring, "music") == 0) {
+            // 音乐播放状态更新（服务端推送）
+            // JSON 格式: {"type":"music","action":"update","title":"...","artist":"...","state":"playing",...}
+            ESP_LOGI(TAG, "Received music message: %s", cJSON_PrintUnformatted(root));
+            auto action = cJSON_GetObjectItem(root, "action");
+            if (cJSON_IsString(action) && strcmp(action->valuestring, "stop") == 0) {
+                Schedule([this, display]() {
+                    MusicPlayer::GetInstance().Clear();
+                    // 恢复到空闲状态的显示
+                    if (GetDeviceState() == kDeviceStateIdle) {
+                        display->SetChatMessage("system", "");
+                        display->SetStatus(Lang::Strings::STANDBY);
+                    }
+                });
+            } else {
+                // 解析并应用音乐状态更新
+                MusicPlayer::GetInstance().UpdateFromJson(root);
+                auto& player = MusicPlayer::GetInstance();
+                if (player.is_playing()) {
+                    Schedule([this, display, 
+                              title = std::string(player.title()),
+                              artist = std::string(player.artist()),
+                              album = std::string(player.album())]() {
+                        // 在屏幕上显示歌曲信息
+                        char status_buf[64];
+                        snprintf(status_buf, sizeof(status_buf), "♪ %s", title.c_str());
+                        display->SetStatus(status_buf);
+                        
+                        char msg_buf[256];
+                        if (!album.empty()) {
+                            snprintf(msg_buf, sizeof(msg_buf), "%s - %s", artist.c_str(), album.c_str());
+                        } else {
+                            snprintf(msg_buf, sizeof(msg_buf), "%s", artist.c_str());
+                        }
+                        display->SetChatMessage("system", msg_buf);
+                    });
+                }
+            }
         } else {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
         }

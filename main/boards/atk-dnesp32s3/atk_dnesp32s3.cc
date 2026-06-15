@@ -6,14 +6,14 @@
  *   - TB6612 双路直流电机驱动（2个N20减速电机，履带行走）
  *   - PanTilt 云台（头部旋转 + 颈部俯仰，PCA9685 模式）
  *   - 双臂舵机控制（左臂 + 右臂）
- *   - 双眼 WS2812 RGB 灯珠（GPIO44 RMT驱动，全彩1600万色，呼吸/闪烁/颜色切换）
+ *   - 双眼 GC9A01 240x240 圆形TFT屏（SPI2独立总线，像素级表情渲染）
  *   - VL53L0X 激光测距（I2C，精确距离控制，替代视觉估算）
  *   - PersonTracker 人物追踪器（拍照→AI分析→云台跟踪+底盘跟随+激光测距）
  *   - 外放喇叭（ES8388 OUT2→NS4150功放→喇叭）
  *   - 统一供电（5V降压模块同时给 ESP32-S3 和电机供电）
  *   - 16 个 MCP 工具，支持语音控制
  * 
- * 硬件：ATK-DNESP32S3 + OV2640 + PCA9685 + TB6612 + VL53L0X + NS4150 + SG90×5 + N20×2 + 喇叭 + WS2812×2
+ * 硬件：ATK-DNESP32S3 + OV2640 + PCA9685 + TB6612 + VL53L0X + NS4150 + SG90×5 + N20×2 + 喇叭 + GC9A01×2
  * 
  * 舵机接线（PCA9685）：
  *   CH0 — 头部水平旋转 (Pan)
@@ -26,9 +26,9 @@
  *   AIN1=GPIO2, AIN2=GPIO8, PWMA=PCA9685_CH5（左电机）
  *   BIN1=GPIO19, BIN2=GPIO20, PWMB=PCA9685_CH6（右电机）
  * 
- * 眼睛灯接线（WS2812）：
- *   GPIO44 → WS2812 DIN → 左眼 → 右眼（级联2颗）
- *   3.3V 供电，无需电平转换
+ * 眼睛接线（GC9A01 7针，共享主屏 SPI 总线）：
+ *   SCLK/MOSI/DC 复用于主屏(GPIO12/11/40)，CS_LEFT=GPIO44, CS_RIGHT=GPIO1
+ *   RST=RC上电复位(10K→3.3V+100nF→GND), BL=3.3V常亮
  * 
  * 喇叭接线：
  *   ES8388 OUT2 → NS4150 功放 → 喇叭（8Ω 1W）
@@ -53,9 +53,10 @@
 
 #include <esp_log.h>
 #include <esp_lcd_panel_vendor.h>
+#include <esp_lcd_panel_io.h>
+#include <esp_lcd_gc9a01.h>
 #include <driver/i2c_master.h>
 #include <driver/spi_common.h>
-#include <driver/rmt_tx.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <cJSON.h>
@@ -92,8 +93,9 @@ public:
     }
 };
 
-// ============ WALL-E 眼睛灯控制器（WS2812 RGB） ============
-class WalleEyes {
+// ============ GC9A01 圆形屏眼睛（SPI 独立总线） ============
+// ============ GC9A01 圆形屏眼睛（SPI 独立总线） ============
+class Gc9a01Eyes {
 public:
     enum EyeMode {
         kOff = 0, kOn, kBreathe, kBlink, kAngry, kSleepy,
@@ -107,99 +109,358 @@ public:
                          (uint8_t)std::clamp((int)(g*factor),0,255),
                          (uint8_t)std::clamp((int)(b*factor),0,255));
         }
-        static Color WarmYellow() { return Color(EYE_COLOR_DEFAULT_R,EYE_COLOR_DEFAULT_G,EYE_COLOR_DEFAULT_B); }
+        static Color WarmYellow() { return Color(255,200,80); }
         static Color Red()        { return Color(255,0,0); }
         static Color Blue()       { return Color(50,100,255); }
         static Color Green()      { return Color(0,255,100); }
         static Color White()      { return Color(255,255,255); }
         static Color Black()      { return Color(0,0,0); }
     };
-    WalleEyes(gpio_num_t gpio) { SetBrightness(EYE_BRIGHTNESS_DEFAULT); color_ = Color::WarmYellow(); InitRmt(gpio); }
-    ~WalleEyes() {
-        StopAnimation();
-        if (encoder_) rmt_del_encoder(encoder_);
-        if (rmt_chan_) rmt_del_channel(rmt_chan_);
+
+    Gc9a01Eyes(spi_host_device_t host, gpio_num_t dc, gpio_num_t cs_left, gpio_num_t cs_right)
+        : host_(host), dc_(dc), cs_left_(cs_left), cs_right_(cs_right)
+    {
+        InitPanels();
+        AllocFramebuffers();
+        if (fb_left_)  ClearFb(fb_left_);
+        if (fb_right_) ClearFb(fb_right_);
+        color_ = Color::WarmYellow();
+        brightness_ = 0.6f;
+        ESP_LOGI(TAG, "GC9A01 eyes: SPI%d DC=%d CS_L=%d CS_R=%d (shared LCD bus)",
+                 host_+1, dc_, cs_left_, cs_right_);
     }
+
+    ~Gc9a01Eyes() {
+        StopAnimation();
+        vTaskDelay(pdMS_TO_TICKS(150));
+        if (panel_left_)  esp_lcd_panel_del(panel_left_);
+        if (panel_right_) esp_lcd_panel_del(panel_right_);
+        if (io_left_)     esp_lcd_panel_io_del(io_left_);
+        if (io_right_)    esp_lcd_panel_io_del(io_right_);
+        // 注意：不释放 SPI 总线，因为与主屏共享
+        if (fb_left_)  heap_caps_free(fb_left_);
+        if (fb_right_) heap_caps_free(fb_right_);
+    }
+
     void SetMode(EyeMode mode) {
         mode_ = mode; StopAnimation();
         switch (mode) {
-            case kOff: UpdateLeds(Color::Black(),Color::Black()); ESP_LOGI(TAG,"Eyes: OFF"); break;
-            case kOn:  UpdateLeds(color_.Scale(brightness_),color_.Scale(brightness_)); ESP_LOGI(TAG,"Eyes: ON"); break;
-            case kBreathe: case kSleepy: StartAnimation(mode==kSleepy?4000:2000); break;
-            case kBlink: StartAnimation(800); break;
-            case kAngry: color_=Color::Red(); StartAnimation(200); break;
+            case kOff:
+                ClearFb(fb_left_); ClearFb(fb_right_);
+                PushBoth();
+                ESP_LOGI(TAG, "Eyes: OFF");
+                break;
+            case kOn:
+                RenderBothOpen(color_); PushBoth();
+                ESP_LOGI(TAG, "Eyes: ON");
+                break;
+            case kBreathe:
+                StartAnimation(2000);
+                break;
+            case kBlink:
+                StartAnimation(800);
+                break;
+            case kAngry:
+                color_ = Color::Red();
+                StartAnimation(200);
+                break;
+            case kSleepy:
+                StartAnimation(4000);
+                break;
         }
     }
-    void SetBrightness(float level) {
-        brightness_=std::clamp(level,0.0f,EYE_BRIGHTNESS_MAX);
-        if(mode_==kOn) UpdateLeds(color_.Scale(brightness_),color_.Scale(brightness_));
+
+    void SetBrightness(float level) { brightness_ = std::clamp(level, 0.0f, 1.0f); }
+
+    void SetColor(uint8_t r, uint8_t g, uint8_t b) {
+        color_ = Color(r, g, b);
+        if (mode_ == kOn) { RenderBothOpen(color_); PushBoth(); }
     }
-    void SetColor(uint8_t r,uint8_t g,uint8_t b) { color_=Color(r,g,b); if(mode_==kOn) UpdateLeds(color_.Scale(brightness_),color_.Scale(brightness_)); }
-    void SetColor(Color c) { color_=c; if(mode_==kOn) UpdateLeds(color_.Scale(brightness_),color_.Scale(brightness_)); }
-    // Wrapper methods for walle_debug_server.cc compatibility
+    void SetColor(Color c) {
+        color_ = c;
+        if (mode_ == kOn) { RenderBothOpen(color_); PushBoth(); }
+    }
+
+    // ---- walle_debug_server 兼容方法 ----
     void turnOff() { SetMode(kOff); }
-    void setColor(uint8_t r,uint8_t g,uint8_t b) { SetColor(r,g,b); }
-    void setBreath(uint8_t r,uint8_t g,uint8_t b) { color_=Color(r,g,b); SetMode(kBreathe); }
-    void setBlink(uint8_t r,uint8_t g,uint8_t b) { color_=Color(r,g,b); SetMode(kBlink); }
-    void setRainbow() { SetColor(255,0,255); SetMode(kBreathe); }
+    void setColor(uint8_t r, uint8_t g, uint8_t b) { SetColor(r, g, b); }
+    void setBreath(uint8_t r, uint8_t g, uint8_t b) { color_ = Color(r, g, b); SetMode(kBreathe); }
+    void setBlink(uint8_t r, uint8_t g, uint8_t b) { color_ = Color(r, g, b); SetMode(kBlink); }
+    void setRainbow() { SetColor(255, 0, 255); SetMode(kBreathe); }
+
     void BlinkOnce() {
-        Color saved=color_; UpdateLeds(Color::Black(),Color::Black());
-        vTaskDelay(pdMS_TO_TICKS(100)); UpdateLeds(saved.Scale(brightness_),saved.Scale(brightness_));
+        Color saved = color_;
+        ClearFb(fb_left_); ClearFb(fb_right_); PushBoth();
+        vTaskDelay(pdMS_TO_TICKS(100));
+        RenderBothOpen(saved); PushBoth();
     }
-    void BlinkOnceAsync() { xTaskCreate([](void* a){static_cast<WalleEyes*>(a)->BlinkOnce();vTaskDelete(NULL);},"blink",1024,this,3,nullptr); }
+    void BlinkOnceAsync() {
+        xTaskCreate([](void* a) { static_cast<Gc9a01Eyes*>(a)->BlinkOnce(); vTaskDelete(NULL); },
+                    "blink", 2048, this, 3, nullptr);
+    }
+
     EyeMode mode() const { return mode_; }
     float brightness() const { return brightness_; }
     Color color() const { return color_; }
+
 private:
-    void InitRmt(gpio_num_t gpio) {
-        rmt_tx_channel_config_t tx_cfg={}; tx_cfg.gpio_num=gpio; tx_cfg.clk_src=RMT_CLK_SRC_DEFAULT;
-        tx_cfg.resolution_hz=10000000; tx_cfg.mem_block_symbols=64; tx_cfg.trans_queue_depth=4;
-        ESP_ERROR_CHECK(rmt_new_tx_channel(&tx_cfg,&rmt_chan_)); ESP_ERROR_CHECK(rmt_enable(rmt_chan_));
-        rmt_copy_encoder_config_t enc_cfg={}; ESP_ERROR_CHECK(rmt_new_copy_encoder(&enc_cfg,&encoder_));
-        ESP_LOGI(TAG,"WS2812 RMT initialized on GPIO%d",gpio);
+    // ======== RGB565 工具 ========
+    static inline uint16_t RGB565(uint8_t r, uint8_t g, uint8_t b) {
+        return ((uint16_t)(r & 0xF8) << 8) | ((uint16_t)(g & 0xFC) << 3) | (b >> 3);
     }
-    void Transmit(const uint8_t* grb_data, size_t len) {
-        rmt_symbol_word_t symbols[256]; size_t sc=0;
-        for(size_t i=0;i<len;i++){uint8_t byte=grb_data[i];
-            for(int b=7;b>=0;b--){bool o=byte&(1<<b);
-                symbols[sc].level0=1; symbols[sc].duration0=o?9:3; symbols[sc].level1=0; symbols[sc].duration1=o?3:9; sc++;}}
-        symbols[sc].level0=0; symbols[sc].duration0=500; symbols[sc].level1=0; symbols[sc].duration1=0; sc++;
-        rmt_transmit_config_t tx_cfg={}; tx_cfg.loop_count=0; tx_cfg.flags.eot_level=0;
-        rmt_transmit(rmt_chan_,encoder_,symbols,sc*sizeof(rmt_symbol_word_t),&tx_cfg);
-        rmt_tx_wait_all_done(rmt_chan_,100);
+    static void ClearFb(uint16_t* fb) {
+        memset(fb, 0, EYE_RESOLUTION * EYE_RESOLUTION * 2);
     }
-    void UpdateLeds(Color l, Color r) {
-        uint8_t buf[6]={l.g,l.r,l.b,r.g,r.r,r.b}; Transmit(buf,6); left_color_=l; right_color_=r;
-    }
-    void StartAnimation(int ms) { if(animating_)return; animating_=true; anim_period_ms_=ms; xTaskCreate(AnimTaskFunc,"eye_anim",2048,this,3,&anim_task_); }
-    void StopAnimation() { animating_=false; if(anim_task_){vTaskDelay(pdMS_TO_TICKS(100));anim_task_=nullptr;} }
-    static void AnimTaskFunc(void* a){static_cast<WalleEyes*>(a)->AnimTask();}
-    void AnimTask() {
-        int step=0;
-        while(animating_){
-            float t=(float)step/40.0f;
-            switch(mode_){
-                case kBreathe:{float v=brightness_*(0.1f+0.9f*(0.5f+0.5f*sinf(t*6.28318f))); UpdateLeds(color_.Scale(v),color_.Scale(v)); break;}
-                case kSleepy: {float v=brightness_*(0.3f+0.7f*(0.5f+0.5f*sinf(t*6.28318f))); UpdateLeds(color_.Scale(v),color_.Scale(v)); break;}
-                case kBlink:  {bool on=(step%20)<12; UpdateLeds(on?color_.Scale(brightness_):Color::Black(),on?color_.Scale(brightness_):Color::Black()); break;}
-                case kAngry:  {bool on=(step%6)<4; Color ac=on?Color::Red().Scale(brightness_):Color::Red().Scale(0.05f); UpdateLeds(ac,ac); break;}
-                default: animating_=false; break;
-            }
-            step=(step+1)%40; vTaskDelay(pdMS_TO_TICKS(anim_period_ms_/40));
+
+    // ======== 像素绘制 ========
+    static void FillRect(uint16_t* fb, int x, int y, int w, int h, uint16_t color) {
+        if (x < 0) { w += x; x = 0; }
+        if (y < 0) { h += y; y = 0; }
+        if (x + w > EYE_RESOLUTION) w = EYE_RESOLUTION - x;
+        if (y + h > EYE_RESOLUTION) h = EYE_RESOLUTION - y;
+        if (w <= 0 || h <= 0) return;
+        for (int row = 0; row < h; row++) {
+            uint16_t* line = fb + (y + row) * EYE_RESOLUTION + x;
+            for (int col = 0; col < w; col++) line[col] = color;
         }
-        anim_task_=nullptr; vTaskDelete(NULL);
     }
-    rmt_channel_handle_t rmt_chan_=nullptr;
-    rmt_encoder_handle_t encoder_=nullptr;
-    EyeMode mode_=kOn;
-    float brightness_=EYE_BRIGHTNESS_DEFAULT;
+    static void FillCircle(uint16_t* fb, int cx, int cy, int r, uint16_t color) {
+        int r2 = r * r;
+        for (int dy = -r; dy <= r; dy++) {
+            int py = cy + dy;
+            if (py < 0 || py >= EYE_RESOLUTION) continue;
+            int dx_max = (int)sqrtf((float)(r2 - dy * dy));
+            int x0 = std::max(0, cx - dx_max);
+            int x1 = std::min(EYE_RESOLUTION - 1, cx + dx_max);
+            for (int px = x0; px <= x1; px++) fb[py * EYE_RESOLUTION + px] = color;
+        }
+    }
+
+    // ======== 画眼睛 ========
+    // 中心点：(cx, cy)，眼白半径 r，虹膜颜色 iris
+    void RenderEye(uint16_t* fb, int cx, int cy, int r, Color iris, float lid_pct) {
+        ClearFb(fb);
+        // 1) 眼白
+        FillCircle(fb, cx, cy, r, RGB565(245, 245, 255));
+        // 2) 虹膜
+        int iris_r = EYE_IRIS_RADIUS;
+        FillCircle(fb, cx, cy - 2, iris_r, RGB565(iris.r, iris.g, iris.b));
+        // 3) 瞳孔
+        int pupil_r = EYE_PUPIL_RADIUS;
+        FillCircle(fb, cx, cy - 2, pupil_r, RGB565(10, 10, 15));
+        // 4) 高光
+        FillCircle(fb, cx + 12, cy - 14, EYE_HIGHLIGHT_RADIUS, RGB565(255, 255, 255));
+        FillCircle(fb, cx + 8,  cy - 10, 4, RGB565(255, 255, 255));
+        // 5) 上眼睑（从顶部覆盖）
+        if (lid_pct > 0.001f) {
+            int lid_h = (int)((float)(r * 2) * lid_pct);
+            uint16_t lid_c = RGB565(EYE_LID_COLOR_R, EYE_LID_COLOR_G, EYE_LID_COLOR_B);
+            FillRect(fb, cx - r, cy - r, r * 2, lid_h, lid_c);
+        }
+    }
+
+    void RenderBothOpen(Color iris) {
+        RenderEye(fb_left_,  120, 120, 115, iris, 0.0f);
+        RenderEye(fb_right_, 120, 120, 115, iris, 0.0f);
+    }
+
+    void RenderBothWithLid(float lid_pct, Color iris) {
+        RenderEye(fb_left_,  120, 120, 115, iris, lid_pct);
+        RenderEye(fb_right_, 120, 120, 115, iris, lid_pct);
+    }
+
+    void RenderAngryEyes() {
+        Color r = Color::Red();
+        // 生气：瞳孔缩小+上移，上眼睑下压成 V 形
+        int iris_r = EYE_IRIS_RADIUS - 5;
+        for (auto* fb : {fb_left_, fb_right_}) {
+            ClearFb(fb);
+            int cx = 120, cy = 120;
+            FillCircle(fb, cx, cy, 115, RGB565(245, 245, 255));
+            FillCircle(fb, cx, cy - 10, iris_r, RGB565(r.r, r.g, r.b));
+            FillCircle(fb, cx, cy - 10, EYE_PUPIL_RADIUS - 3, RGB565(10, 10, 15));
+            // 上眼睑下压 + 内斜
+            uint16_t lid = RGB565(EYE_LID_COLOR_R, EYE_LID_COLOR_G, EYE_LID_COLOR_B);
+            for (int y = cy - 115; y < cy; y++) {
+                int ang = (y - (cy - 115)) * 2;
+                int margin = std::min(30, ang / 4);
+                int x0 = cx - 115 + margin;
+                int x1 = cx + 115 - margin;
+                FillRect(fb, x0, y, x1 - x0, 1, lid);
+            }
+        }
+    }
+
+    // ======== SPI 面板初始化 ========
+    // 返回 true=成功, false=失败（非致命，屏没接也能跑）
+    bool InitPanel(gpio_num_t cs, esp_lcd_panel_io_handle_t& io, esp_lcd_panel_handle_t& panel) {
+        esp_lcd_panel_io_spi_config_t io_cfg = {};
+        io_cfg.cs_gpio_num = cs;
+        io_cfg.dc_gpio_num = dc_;
+        io_cfg.spi_mode = 0;
+        io_cfg.pclk_hz = EYE_PCLK_HZ;
+        io_cfg.trans_queue_depth = 10;
+        io_cfg.lcd_cmd_bits = 8;
+        io_cfg.lcd_param_bits = 8;
+        io_cfg.on_color_trans_done = nullptr;
+        io_cfg.user_ctx = nullptr;
+        esp_err_t ret = esp_lcd_new_panel_io_spi(host_, &io_cfg, &io);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Eye CS=%d: panel IO failed (err=0x%x), skipping", cs, ret);
+            return false;
+        }
+
+        gc9a01_vendor_config_t vendor = {};
+        vendor.init_cmds = nullptr;
+        vendor.init_cmds_size = 0;
+
+        esp_lcd_panel_dev_config_t panel_cfg = {};
+        panel_cfg.reset_gpio_num = GPIO_NUM_NC;
+        panel_cfg.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
+        panel_cfg.bits_per_pixel = 16;
+        panel_cfg.vendor_config = &vendor;
+        ret = esp_lcd_new_panel_gc9a01(io, &panel_cfg, &panel);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Eye CS=%d: panel create failed (err=0x%x), freeing IO", cs, ret);
+            esp_lcd_panel_io_del(io);
+            io = nullptr;
+            return false;
+        }
+
+        ret = esp_lcd_panel_reset(panel);
+        if (ret != ESP_OK) { ESP_LOGW(TAG, "Eye CS=%d: panel reset warn (err=0x%x)", cs, ret); }
+
+        ret = esp_lcd_panel_init(panel);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Eye CS=%d: panel init failed (err=0x%x) — display not connected?", cs, ret);
+            esp_lcd_panel_del(panel);
+            esp_lcd_panel_io_del(io);
+            panel = nullptr; io = nullptr;
+            return false;
+        }
+
+        esp_lcd_panel_invert_color(panel, true);
+        esp_lcd_panel_mirror(panel, false, false);
+        esp_lcd_panel_disp_on_off(panel, true);
+        ESP_LOGI(TAG, "Eye CS=%d: GC9A01 OK", cs);
+        return true;
+    }
+
+    void InitPanels() {
+        bool left_ok  = InitPanel(cs_left_,  io_left_,  panel_left_);
+        bool right_ok = InitPanel(cs_right_, io_right_, panel_right_);
+        // AllocFramebuffers 前置的条件检查
+        if (!left_ok && !right_ok) {
+            ESP_LOGW(TAG, "No GC9A01 eyes detected — running headless");
+            return;
+        }
+        if (!left_ok)  { ESP_LOGW(TAG, "Left eye missing, right eye only"); }
+        if (!right_ok) { ESP_LOGW(TAG, "Right eye missing, left eye only"); }
+    }
+
+    void AllocFramebuffers() {
+        size_t sz = EYE_RESOLUTION * EYE_RESOLUTION * 2;
+        fb_left_  = (uint16_t*)heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        fb_right_ = (uint16_t*)heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        assert(fb_left_ && fb_right_);
+    }
+
+    void PushPanel(esp_lcd_panel_handle_t panel, uint16_t* fb) {
+        if (!panel || !fb) return;
+        esp_lcd_panel_draw_bitmap(panel, 0, 0, EYE_RESOLUTION, EYE_RESOLUTION, fb);
+    }
+    void PushBoth() {
+        PushPanel(panel_left_, fb_left_);
+        PushPanel(panel_right_, fb_right_);
+    }
+
+    // ======== 动画 ========
+    void StartAnimation(int ms) {
+        if (animating_) return;
+        animating_ = true;
+        anim_period_ms_ = ms;
+        xTaskCreate(AnimTaskFunc, "eye_anim", 3072, this, 3, &anim_task_);
+    }
+    void StopAnimation() {
+        animating_ = false;
+        if (anim_task_) { vTaskDelay(pdMS_TO_TICKS(150)); anim_task_ = nullptr; }
+    }
+    static void AnimTaskFunc(void* a) { static_cast<Gc9a01Eyes*>(a)->AnimTask(); }
+
+    void AnimTask() {
+        int step = 0, total_steps = anim_period_ms_ / 20;
+        if (total_steps < 10) total_steps = 10;
+        Color iris = color_;
+        while (animating_) {
+            switch (mode_) {
+                case kBreathe: {
+                    float t = (float)(step % total_steps) / (float)total_steps;
+                    float scale = 0.7f + 0.3f * sinf(t * 2.0f * 3.14159f);
+                    int ir = (int)(EYE_IRIS_RADIUS * scale);
+                    int pr = (int)(EYE_PUPIL_RADIUS * scale);
+                    RenderBreathFrame(iris, ir, pr);
+                    break;
+                }
+                case kSleepy: {
+                    float t = (float)(step % total_steps) / (float)total_steps;
+                    float lid = 0.3f + 0.3f * (0.5f + 0.5f * sinf(t * 2.0f * 3.14159f));
+                    RenderBothWithLid(lid, Color::Blue());
+                    PushBoth();
+                    break;
+                }
+                case kBlink: {
+                    int ss = step % 30;
+                    float lid = 0.0f;
+                    if (ss < 5)       lid = (float)ss / 5.0f;       // 闭眼
+                    else if (ss < 10) lid = 1.0f;                     // 全闭
+                    else if (ss < 15) lid = 1.0f - (float)(ss-10)/5.0f; // 睁眼
+                    else              lid = 0.0f;                     // 全开
+                    RenderBothWithLid(lid, iris);
+                    PushBoth();
+                    break;
+                }
+                case kAngry: {
+                    RenderAngryEyes(); PushBoth();
+                    break;
+                }
+                default:
+                    animating_ = false;
+                    break;
+            }
+            step = (step + 1) % total_steps;
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        anim_task_ = nullptr;
+        vTaskDelete(NULL);
+    }
+
+    void RenderBreathFrame(Color iris, int iris_r, int pupil_r) {
+        for (auto* fb : {fb_left_, fb_right_}) {
+            ClearFb(fb);
+            FillCircle(fb, 120, 120, 115, RGB565(245, 245, 255));
+            FillCircle(fb, 120, 118, iris_r, RGB565(iris.r, iris.g, iris.b));
+            FillCircle(fb, 120, 118, pupil_r, RGB565(10, 10, 15));
+            FillCircle(fb, 132, 106, EYE_HIGHLIGHT_RADIUS, RGB565(255, 255, 255));
+        }
+        PushBoth();
+    }
+
+    spi_host_device_t host_;
+    gpio_num_t dc_, cs_left_, cs_right_;
+    esp_lcd_panel_io_handle_t io_left_ = nullptr, io_right_ = nullptr;
+    esp_lcd_panel_handle_t panel_left_ = nullptr, panel_right_ = nullptr;
+    uint16_t* fb_left_ = nullptr;
+    uint16_t* fb_right_ = nullptr;
+    EyeMode mode_ = kOn;
+    float brightness_ = 0.6f;
     Color color_;
-    Color left_color_;
-    Color right_color_;
-    bool animating_=false;
-    int anim_period_ms_=2000;
-    TaskHandle_t anim_task_=nullptr;
+    bool animating_ = false;
+    int anim_period_ms_ = 2000;
+    TaskHandle_t anim_task_ = nullptr;
 };
+
+// 保留别名方便过渡
+using WalleEyes = Gc9a01Eyes;
 
 // ============ WALL-E 表情控制器 ============
 class WalleExpression {
@@ -231,7 +492,7 @@ public:
                 case kScared:  eyes_->SetColor(WalleEyes::Color::White()); eyes_->SetMode(WalleEyes::kBlink); eyes_->SetBrightness(1.0f); break;
                 case kWave:    eyes_->SetColor(WalleEyes::Color::WarmYellow()); eyes_->SetMode(WalleEyes::kOn); eyes_->SetBrightness(0.8f); break;
                 case kNeutral:
-                default:       eyes_->SetColor(WalleEyes::Color::WarmYellow()); eyes_->SetMode(WalleEyes::kOn); eyes_->SetBrightness(EYE_BRIGHTNESS_DEFAULT); break;
+                default:       eyes_->SetColor(WalleEyes::Color::WarmYellow()); eyes_->SetMode(WalleEyes::kOn); eyes_->SetBrightness(0.6f); break;
             }
         }
         // 手臂联动
@@ -791,6 +1052,11 @@ private:
     }
 
     void InitializeCamera() {
+        if (!xl9555_) {
+            ESP_LOGW(TAG, "Camera: XL9555 not available, skipping");
+            camera_ = nullptr;
+            return;
+        }
         xl9555_->SetOutputState(OV_PWDN_IO, 0);
         xl9555_->SetOutputState(OV_RESET_IO, 0);
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -840,18 +1106,32 @@ private:
         camera_ = new EspVideo(video_config);
     }
 
-    /** 初始化 PCA9685 PWM 驱动板 */
+    /** 初始化 PCA9685 PWM 驱动板（fail-soft：未连接不崩溃） */
     void InitializePCA9685() {
-        // PCA9685 挂在主 I2C 总线上，与 ES8388/XL9555 共享
-        // 地址 0x40（默认），50Hz 舵机频率
-        pca9685_ = new PCA9685(i2c_bus_, PCA9685_I2C_ADDR, PCA9685_SERVO_FREQ_HZ);
+        // I2C probe: 确认 PCA9685 物理连接
+        i2c_device_config_t dev_cfg = {
+            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+            .device_address = PCA9685_I2C_ADDR,
+            .scl_speed_hz = 100000,
+        };
+        i2c_master_dev_handle_t dev;
+        esp_err_t ret = i2c_master_bus_add_device(i2c_bus_, &dev_cfg, &dev);
+        if (ret == ESP_OK) {
+            uint8_t reg = 0x00, val = 0;
+            ret = i2c_master_transmit_receive(dev, &reg, 1, &val, 1, 50);
+            i2c_master_bus_rm_device(dev);
+        }
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "PCA9685 not found at 0x%02X — servos/motors disabled", PCA9685_I2C_ADDR);
+            pca9685_ = nullptr;
+            return;
+        }
 
-        // 所有通道初始化为0
+        pca9685_ = new PCA9685(i2c_bus_, PCA9685_I2C_ADDR, PCA9685_SERVO_FREQ_HZ);
         for (int i = 0; i < 16; i++) {
             pca9685_->SetDutyCycle(i, 0);
         }
-
-        ESP_LOGI(TAG, "PCA9685 initialized on I2C bus");
+        ESP_LOGI(TAG, "PCA9685 OK at 0x%02X", PCA9685_I2C_ADDR);
     }
 
     /** 初始化 TB6612 电机驱动 */
@@ -873,6 +1153,11 @@ private:
 
     /** 初始化云台（PCA9685 模式） */
     void InitializePanTilt() {
+        if (!pca9685_) {
+            ESP_LOGW(TAG, "PanTilt: PCA9685 not available, skipping");
+            pan_tilt_ = nullptr;
+            return;
+        }
         PanTilt::Config cfg;
         cfg.mode = PanTilt::DriverMode::PCA9685;
         cfg.min_angle = HEAD_PAN_MIN;
@@ -889,18 +1174,25 @@ private:
 
     /** 初始化 WALL-E 表情控制 */
     void InitializeExpression() {
-        // 先初始化眼睛（Expression 需要联动眼睛）
-        InitializeEyes();
+        InitializeEyes();  // 已 fail-soft
+        if (!pca9685_) {
+            ESP_LOGW(TAG, "WalleExpression: PCA9685 not available, skipping");
+            expression_ = nullptr;
+            return;
+        }
         expression_ = new WalleExpression(pca9685_, eyes_);
         ESP_LOGI(TAG, "WALLE-Expression initialized");
     }
 
-    /** 初始化 WALL-E 眼睛灯（WS2812 RGB） */
+    /** 初始化 WALL-E 眼睛 — 延迟到硬件就绪（阶段5），避免启动时消耗内存 */
     void InitializeEyes() {
-        eyes_ = new WalleEyes(WS2812_GPIO);
-        eyes_->SetMode(WalleEyes::kOn);  // 开机亮眼（暖黄色）
-        ESP_LOGI(TAG, "WALLE-Eyes initialized (WS2812 on GPIO%d, %d LEDs)", WS2812_GPIO, WS2812_LED_COUNT);
+        // GC9A01 双屏帧缓冲 230KB PSRAM + animation task 3KB 栈，
+        // 未连接时完全不分配，保证 WiFi / 语音等核心功能有足够内存
+        ESP_LOGI(TAG, "WALLE-Eyes deferred (GC9A01 Stage5) — call walle_eyes_start after connecting screens");
+        eyes_ = nullptr;
     }
+
+    // StartEyes() moved to public section — see below
 
     /** 初始化 VL53L0X 激光测距传感器 */
     void InitializeToF() {
@@ -913,8 +1205,14 @@ private:
 
     /** 初始化人物追踪器 */
     void InitializeTracker() {
+        bool tof_ok = (tof_ != nullptr) && tof_->IsInitialized();
+        if (!pan_tilt_ && !camera_) {
+            ESP_LOGW(TAG, "PersonTracker: no pan/tilt or camera, skipping");
+            tracker_ = nullptr;
+            return;
+        }
         tracker_ = new PersonTracker(pan_tilt_, camera_, motor_driver_, pca9685_, tof_);
-        ESP_LOGI(TAG, "PersonTracker initialized (ToF=%s)", tof_->IsInitialized() ? "YES" : "NO");
+        ESP_LOGI(TAG, "PersonTracker initialized (ToF=%s)", tof_ok ? "YES" : "NO");
     }
 
     /** 注册 MCP 工具，支持语音控制 */
@@ -1060,38 +1358,52 @@ private:
                 return true;
             });
 
-        // ============ 眼睛灯控制（4个） ============
+        // ============ 眼睛屏控制（5个） ============
+
+        mcp.AddTool("self.eyes.start",
+            "启动WALL-E眼睛屏（GC9A01 240x240 TFT）。仅在屏幕已物理连接后调用，启动后会分配帧缓冲并开始渲染瞳孔动画。5阶段调试：阶段5使用。",
+            PropertyList(),
+            [this](const PropertyList& props) -> ReturnValue {
+                if (eyes_) { ESP_LOGW(TAG, "Eyes already started"); return true; }
+                eyes_ = new Gc9a01Eyes(EYE_SPI_HOST, GPIO_NUM_40, EYE_CS_LEFT, EYE_CS_RIGHT);
+                eyes_->SetMode(Gc9a01Eyes::kOn);
+                ESP_LOGI(TAG, "MCP: eyes started");
+                return true;
+            });
 
         mcp.AddTool("self.eyes.set_mode",
-            "设置WALL-E眼睛灯模式。0=关闭，1=常亮，2=呼吸灯，3=闪烁，4=生气(红色快速闪烁)，5=困倦(慢呼吸)。",
+            "设置WALL-E眼睛模式。0=关闭，1=常亮，2=呼吸，3=眨眼，4=生气，5=困倦。需要先调用 self.eyes.start 启动眼睛屏。",
             PropertyList({
                 Property("mode", kPropertyTypeInteger, 1, 0, 5)
             }),
             [this](const PropertyList& props) -> ReturnValue {
+                if (!eyes_) { ESP_LOGW(TAG, "Eyes not started"); return false; }
                 int mode = props["mode"].value<int>();
                 eyes_->SetMode(static_cast<WalleEyes::EyeMode>(mode));
                 return true;
             });
 
         mcp.AddTool("self.eyes.set_brightness",
-            "设置WALL-E眼睛亮度。0=最暗，100=最亮。",
+            "设置WALL-E眼睛亮度。0=最暗，100=最亮。需要先调用 self.eyes.start。",
             PropertyList({
                 Property("brightness", kPropertyTypeInteger, 60, 0, 100)
             }),
             [this](const PropertyList& props) -> ReturnValue {
+                if (!eyes_) { ESP_LOGW(TAG, "Eyes not started"); return false; }
                 int val = props["brightness"].value<int>();
                 eyes_->SetBrightness(val / 100.0f);
                 return true;
             });
 
         mcp.AddTool("self.eyes.set_color",
-            "设置WALL-E眼睛颜色。RGB格式，每个通道0-255。默认暖黄色(255,200,80)。",
+            "设置WALL-E眼睛颜色。RGB格式，每个通道0-255。默认暖黄色(255,200,80)。需要先调用 self.eyes.start。",
             PropertyList({
                 Property("r", kPropertyTypeInteger, 255, 0, 255),
                 Property("g", kPropertyTypeInteger, 200, 0, 255),
                 Property("b", kPropertyTypeInteger, 80, 0, 255)
             }),
             [this](const PropertyList& props) -> ReturnValue {
+                if (!eyes_) { ESP_LOGW(TAG, "Eyes not started"); return false; }
                 int r = props["r"].value<int>();
                 int g = props["g"].value<int>();
                 int b = props["b"].value<int>();
@@ -1100,14 +1412,15 @@ private:
             });
 
         mcp.AddTool("self.eyes.blink",
-            "WALL-E眨眼。",
+            "WALL-E眨眼。需要先调用 self.eyes.start。",
             PropertyList(),
             [this](const PropertyList& props) -> ReturnValue {
+                if (!eyes_) { ESP_LOGW(TAG, "Eyes not started"); return false; }
                 eyes_->BlinkOnceAsync();
                 return true;
             });
 
-        ESP_LOGI(TAG, "MCP tools registered (17 WALL-E tools)");
+        ESP_LOGI(TAG, "MCP tools registered (18 WALL-E tools)");
     }
 
 public:
@@ -1171,6 +1484,18 @@ public:
 
     // ============ WALL-E 公共访问接口 ============
     WalleEyes* GetWalleEyes() { return eyes_; }
+
+    /** 启动眼睛屏（5阶段调试：阶段5）— 仅在 GC9A01 物理连接后调用 */
+    void StartEyes() {
+        if (eyes_) {
+            ESP_LOGW(TAG, "Eyes already started");
+            return;
+        }
+        eyes_ = new Gc9a01Eyes(EYE_SPI_HOST, GPIO_NUM_40, EYE_CS_LEFT, EYE_CS_RIGHT);
+        eyes_->SetMode(Gc9a01Eyes::kOn);
+        ESP_LOGI(TAG, "WALLE-Eyes started (GC9A01 share LCD bus, CS_L=%d CS_R=%d)",
+                 EYE_CS_LEFT, EYE_CS_RIGHT);
+    }
     PCA9685* GetPca9685() { return pca9685_; }
     PanTilt* GetPanTilt() { return pan_tilt_; }
     TB6612* GetMotorDriver() { return motor_driver_; }
@@ -1208,6 +1533,28 @@ extern "C" {
         auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
         auto* eyes = board->GetWalleEyes();
         if (eyes) eyes->setRainbow();
+    }
+    void walle_eyes_setBrightness(float level) {
+        auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
+        auto* eyes = board->GetWalleEyes();
+        if (eyes) eyes->SetBrightness(level);
+    }
+    void walle_eyes_setMode(const char* mode_str) {
+        auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
+        auto* eyes = board->GetWalleEyes();
+        if (!eyes) return;
+        if (strcmp(mode_str, "on") == 0)      eyes->SetMode(Gc9a01Eyes::kOn);
+        else if (strcmp(mode_str, "off") == 0)     eyes->SetMode(Gc9a01Eyes::kOff);
+        else if (strcmp(mode_str, "breathe") == 0) eyes->SetMode(Gc9a01Eyes::kBreathe);
+        else if (strcmp(mode_str, "blink") == 0)   eyes->SetMode(Gc9a01Eyes::kBlink);
+        else if (strcmp(mode_str, "angry") == 0)   eyes->SetMode(Gc9a01Eyes::kAngry);
+        else if (strcmp(mode_str, "sleepy") == 0)  eyes->SetMode(Gc9a01Eyes::kSleepy);
+    }
+    
+    // 延迟启动眼睛屏（连接 GC9A01 后调用，通过 MCP/debug API）
+    void walle_eyes_start() {
+        auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
+        board->StartEyes();
     }
     
     // 表情控制（直接调用 PCA9685）

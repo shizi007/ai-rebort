@@ -275,18 +275,27 @@
     
     <main id="tab-display">
       <div class="card">
-        <h2>👁️ 眼睛灯控制</h2>
+        <h2>👁️ GC9A01 TFT 眼睛控制</h2>
+        <div style="margin-bottom:10px">
+          <button onclick="startEyes()" style="background:#00bcd4;color:#fff;border:none;padding:8px 24px;border-radius:6px;font-size:15px;cursor:pointer">🚀 启动眼睛屏 (Start Eyes)</button>
+          <small style="color:#888;margin-left:10px">先点这里再调颜色/模式</small>
+        </div>
         <div class="color-row">
-          <label>颜色选择：</label>
-          <input type="color" value="#00ff00" id="eye-color">
+          <label>瞳孔颜色：</label>
+          <input type="color" value="#ffaa00" id="eye-color">
+        </div>
+        <div class="servo-control">
+          <div class="servo-label"><span>亮度</span><span class="servo-value" id="brightness-val">60%</span></div>
+          <input type="range" min="10" max="100" value="60" id="brightness-slider" oninput="document.getElementById('brightness-val').textContent=this.value+'%'" onchange="updateEyes()">
         </div>
         <select id="eye-mode" onchange="updateEyes()">
-          <option value="breath">呼吸灯</option>
-          <option value="static">常亮</option>
-          <option value="blink">闪烁</option>
-          <option value="rainbow">彩虹</option>
-          <option value="chase">跑马灯</option>
-          <option value="off">关闭</option>
+          <option value="on">常亮（圆形瞳孔）</option>
+          <option value="blink">眨眼</option>
+          <option value="breath">呼吸</option>
+          <option value="angry">😠 生气</option>
+          <option value="sad">😢 悲伤</option>
+          <option value="sleepy">😴 困了</option>
+          <option value="off">关闭屏幕</option>
         </select>
       </div>
       
@@ -404,10 +413,23 @@
       }
     }
     
+    // 延迟启动 GC9A01 眼睛屏
+    function startEyes() {
+      apiCall('/api/eyes', 'POST', { mode: 'start' }).then(() => {
+        alert('眼睛屏已启动！现在可以调整颜色和模式了 ✅');
+      });
+    }
+
     function updateEyes() {
       const color = document.getElementById('eye-color').value;
       const mode = document.getElementById('eye-mode').value;
-      apiCall('/api/eyes', 'POST', { mode, color });
+      const brightness = parseInt(document.getElementById('brightness-slider').value) / 100;
+      apiCall('/api/eyes', 'POST', { mode, color, brightness });
+    }
+    function updateBrightness() {
+      const b = document.getElementById('brightness-slider').value;
+      document.getElementById('brightness-val').textContent = b + '%';
+      updateEyes();
     }
     document.getElementById('eye-color').addEventListener('change', updateEyes);
     
