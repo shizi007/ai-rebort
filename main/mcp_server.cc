@@ -129,10 +129,10 @@ void McpServer::AddCommonTools() {
         "更新音乐播放状态和当前曲目信息，用于在设备屏幕上显示歌曲信息。"
         "服务端在开始播放音乐、切换歌曲、暂停/恢复时应调用此工具。",
         PropertyList({
-            Property("title", kPropertyTypeString, ""),
-            Property("artist", kPropertyTypeString, ""),
-            Property("album", kPropertyTypeString, ""),
-            Property("state", kPropertyTypeString, "playing"),  // playing | paused | idle
+            Property("title", kPropertyTypeString, std::string("")),
+            Property("artist", kPropertyTypeString, std::string("")),
+            Property("album", kPropertyTypeString, std::string("")),
+            Property("state", kPropertyTypeString, std::string("playing")),
             Property("duration", kPropertyTypeInteger, 0, 0, 86400),
             Property("position", kPropertyTypeInteger, 0, 0, 86400),
         }),

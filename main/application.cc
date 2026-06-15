@@ -547,7 +547,8 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (GetDeviceState() == kDeviceStateSpeaking) {
+        if (GetDeviceState() == kDeviceStateSpeaking
+            || MusicPlayer::GetInstance().is_playing()) {
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
     });

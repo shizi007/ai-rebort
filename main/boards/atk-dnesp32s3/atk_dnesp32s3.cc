@@ -2,29 +2,33 @@
  * 正点原子 ATK-DNESP32S3  瓦利机器人版
  * 
  * 基于基础版 atk_dnesp32s3 机器人：
- *   - PCA9685 I2C 16路PWM驱动板（5个舵机 + 2路电机PWM + 2路眼睛灯PWM）
+ *   - PCA9685 I2C 16路PWM驱动板（9个舵机 + 2路电机PWM）
  *   - TB6612 双路直流电机驱动（2个N20减速电机，履带行走）
- *   - PanTilt 云台（头部旋转 + 颈部俯仰，PCA9685 模式）
+ *   - PanTilt 云台（脖子左右 + 头部上下 + 脖子伸缩，PCA9685 模式）
  *   - 双臂舵机控制（左臂 + 右臂）
- *   - 双眼 GC9A01 240x240 圆形TFT屏（SPI2独立总线，像素级表情渲染）
+ *   - 双眼 GC9A01 240x240 圆形TFT屏（共享主屏SPI总线，像素级表情渲染）
  *   - VL53L0X 激光测距（I2C，精确距离控制，替代视觉估算）
  *   - PersonTracker 人物追踪器（拍照→AI分析→云台跟踪+底盘跟随+激光测距）
  *   - 外放喇叭（ES8388 OUT2→NS4150功放→喇叭）
- *   - 统一供电（5V降压模块同时给 ESP32-S3 和电机供电）
- *   - 16 个 MCP 工具，支持语音控制
+ *   - 电源：12V输入→DC-DC 10-36V降压模块→5V全系统供电
+ *   - 17 个 MCP 工具，支持语音控制
  * 
- * 硬件：ATK-DNESP32S3 + OV2640 + PCA9685 + TB6612 + VL53L0X + NS4150 + SG90×5 + N20×2 + 喇叭 + GC9A01×2
+ * 硬件：ATK-DNESP32S3 + OV2640 + PCA9685 + TB6612 + VL53L0X + NS4150 + SG90×9 + N20×2 + 喇叭 + GC9A01×2
  * 
  * 舵机接线（PCA9685）：
- *   CH0 — 头部水平旋转 (Pan)
- *   CH1 — 颈部俯仰 (Tilt)
- *   CH2 — 左臂
- *   CH3 — 右臂
- *   CH4 — 备用
+ *   CH0 — 左眼
+ *   CH1 — 右眼
+ *   CH2 — 脖子左右转动 (NECK_LR)
+ *   CH3 — 头部上下 (HEAD_UD)
+ *   CH4 — 脖子伸缩回 (NECK_OI)
+ *   CH5 — 左臂 (L_ARM)
+ *   CH6 — 右臂 (R_ARM)
+ *   CH7 — 左眉毛 (L_BROW)
+ *   CH8 — 右眉毛 (R_BROW)
  * 
  * 电机接线（TB6612）：
- *   AIN1=GPIO2, AIN2=GPIO8, PWMA=PCA9685_CH5（左电机）
- *   BIN1=GPIO19, BIN2=GPIO20, PWMB=PCA9685_CH6（右电机）
+ *   AIN1=GPIO2, AIN2=GPIO8, PWMA=PCA9685_CH9（左电机）
+ *   BIN1=GPIO19, BIN2=GPIO20, PWMB=PCA9685_CH10（右电机）
  * 
  * 眼睛接线（GC9A01 7针，共享主屏 SPI 总线）：
  *   SCLK/MOSI/DC 复用于主屏(GPIO12/11/40)，CS_LEFT=GPIO44, CS_RIGHT=GPIO1
@@ -56,11 +60,14 @@
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_gc9a01.h>
 #include <driver/i2c_master.h>
+#include <driver/i2s_std.h>
+#include <driver/i2s_common.h>
 #include <driver/spi_common.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <cJSON.h>
 #include <cmath>
+#include <vector>
 
 #define TAG "atk_dnesp32s3"
 
@@ -476,9 +483,16 @@ public:
 
     WalleExpression(PCA9685* pca, WalleEyes* eyes)
         : pca_(pca), eyes_(eyes) {
-        // 初始化到默认姿态
+        // 初始化所有关节到默认姿态
         SetArmLeft(ARM_LEFT_CENTER);
         SetArmRight(ARM_RIGHT_CENTER);
+        SetHeadUD(HEAD_UD_CENTER);
+        SetNeckLR(NECK_LR_CENTER);
+        SetNeckOI(NECK_OI_CENTER);
+        SetEyeLeft(EYE_LEFT_CENTER);
+        SetEyeRight(EYE_RIGHT_CENTER);
+        SetBrowLeft(BROW_LEFT_CENTER);
+        SetBrowRight(BROW_RIGHT_CENTER);
     }
 
     void SetExpression(Expression expr) {
@@ -495,31 +509,61 @@ public:
                 default:       eyes_->SetColor(WalleEyes::Color::WarmYellow()); eyes_->SetMode(WalleEyes::kOn); eyes_->SetBrightness(0.6f); break;
             }
         }
-        // 手臂联动
+        // 全关节联动（9舵机）
         switch (expr) {
             case kHappy:
-                SetArmLeft(40.0f);    // 左臂举起
-                SetArmRight(140.0f);  // 右臂举起
+                SetArmLeft(40.0f);
+                SetArmRight(140.0f);
+                SetHeadUD(110.0f);       // 头微抬
+                SetNeckLR(NECK_LR_CENTER);
+                SetNeckOI(NECK_OI_CENTER);
+                SetBrowLeft(110.0f);     // 眉毛上挑
+                SetBrowRight(70.0f);
                 break;
             case kSad:
-                SetArmLeft(80.0f);    // 双臂下垂
+                SetArmLeft(80.0f);
                 SetArmRight(100.0f);
+                SetHeadUD(60.0f);        // 低头
+                SetNeckLR(NECK_LR_CENTER);
+                SetNeckOI(60.0f);        // 脖子后缩
+                SetBrowLeft(70.0f);      // 眉毛下垂
+                SetBrowRight(110.0f);
                 break;
             case kCurious:
-                SetArmLeft(50.0f);    // 左臂微抬
-                SetArmRight(110.0f);  // 右臂自然
+                SetArmLeft(50.0f);
+                SetArmRight(110.0f);
+                SetHeadUD(100.0f);
+                SetNeckLR(70.0f);        // 头微偏
+                SetNeckOI(110.0f);       // 脖子前伸
+                SetBrowLeft(100.0f);
+                SetBrowRight(80.0f);
                 break;
             case kScared:
-                SetArmLeft(30.0f);    // 双臂举起
+                SetArmLeft(30.0f);
                 SetArmRight(150.0f);
+                SetHeadUD(50.0f);        // 猛低头
+                SetNeckLR(NECK_LR_CENTER);
+                SetNeckOI(50.0f);        // 猛后缩
+                SetBrowLeft(70.0f);
+                SetBrowRight(110.0f);
                 break;
             case kWave:
+                SetHeadUD(HEAD_UD_CENTER);
+                SetNeckLR(NECK_LR_CENTER);
+                SetNeckOI(NECK_OI_CENTER);
+                SetBrowLeft(BROW_LEFT_CENTER);
+                SetBrowRight(BROW_RIGHT_CENTER);
                 StartWave();
                 return;
             case kNeutral:
             default:
                 SetArmLeft(ARM_LEFT_CENTER);
                 SetArmRight(ARM_RIGHT_CENTER);
+                SetHeadUD(HEAD_UD_CENTER);
+                SetNeckLR(NECK_LR_CENTER);
+                SetNeckOI(NECK_OI_CENTER);
+                SetBrowLeft(BROW_LEFT_CENTER);
+                SetBrowRight(BROW_RIGHT_CENTER);
                 break;
         }
         StopWave();
@@ -529,14 +573,47 @@ public:
 
     void SetArmLeft(float angle) {
         left_arm_angle_ = std::clamp(angle, ARM_MIN, ARM_MAX);
-        pca_->SetServoAngle(SERVO_LEFT_ARM_CH, left_arm_angle_);
-        ESP_LOGD(TAG, "Left arm: %.1f°", left_arm_angle_);
+        pca_->SetServoAngle(SERVO_L_ARM_CH, left_arm_angle_);
     }
 
     void SetArmRight(float angle) {
         right_arm_angle_ = std::clamp(angle, ARM_MIN, ARM_MAX);
-        pca_->SetServoAngle(SERVO_RIGHT_ARM_CH, right_arm_angle_);
-        ESP_LOGD(TAG, "Right arm: %.1f°", right_arm_angle_);
+        pca_->SetServoAngle(SERVO_R_ARM_CH, right_arm_angle_);
+    }
+
+    void SetHeadUD(float angle) {
+        head_ud_angle_ = std::clamp(angle, HEAD_UD_MIN, HEAD_UD_MAX);
+        pca_->SetServoAngle(SERVO_HEAD_UD_CH, head_ud_angle_);
+    }
+
+    void SetNeckLR(float angle) {
+        neck_lr_angle_ = std::clamp(angle, NECK_LR_MIN, NECK_LR_MAX);
+        pca_->SetServoAngle(SERVO_NECK_LR_CH, neck_lr_angle_);
+    }
+
+    void SetNeckOI(float angle) {
+        neck_oi_angle_ = std::clamp(angle, NECK_OI_MIN, NECK_OI_MAX);
+        pca_->SetServoAngle(SERVO_NECK_OI_CH, neck_oi_angle_);
+    }
+
+    void SetEyeLeft(float angle) {
+        eye_left_angle_ = std::clamp(angle, EYE_MIN, EYE_MAX);
+        pca_->SetServoAngle(SERVO_L_EYE_CH, eye_left_angle_);
+    }
+
+    void SetEyeRight(float angle) {
+        eye_right_angle_ = std::clamp(angle, EYE_MIN, EYE_MAX);
+        pca_->SetServoAngle(SERVO_R_EYE_CH, eye_right_angle_);
+    }
+
+    void SetBrowLeft(float angle) {
+        brow_left_angle_ = std::clamp(angle, BROW_MIN, BROW_MAX);
+        pca_->SetServoAngle(SERVO_L_BROW_CH, brow_left_angle_);
+    }
+
+    void SetBrowRight(float angle) {
+        brow_right_angle_ = std::clamp(angle, BROW_MIN, BROW_MAX);
+        pca_->SetServoAngle(SERVO_R_BROW_CH, brow_right_angle_);
     }
 
     float left_arm_angle() const { return left_arm_angle_; }
@@ -585,6 +662,13 @@ private:
     Expression current_expr_ = kNeutral;
     float left_arm_angle_ = ARM_LEFT_CENTER;
     float right_arm_angle_ = ARM_RIGHT_CENTER;
+    float head_ud_angle_ = HEAD_UD_CENTER;
+    float neck_lr_angle_ = NECK_LR_CENTER;
+    float neck_oi_angle_ = NECK_OI_CENTER;
+    float eye_left_angle_ = EYE_LEFT_CENTER;
+    float eye_right_angle_ = EYE_RIGHT_CENTER;
+    float brow_left_angle_ = BROW_LEFT_CENTER;
+    float brow_right_angle_ = BROW_RIGHT_CENTER;
     bool waving_ = false;
     TaskHandle_t wave_task_ = nullptr;
 };
@@ -959,6 +1043,146 @@ private:
     TrackResult last_result_;
 };
 
+// ============ 外接音频（MAX98357A + INMP441, I2S1） ============
+class ExternalAudio {
+public:
+    ExternalAudio() {}
+    ~ExternalAudio() { Deinit(); }
+
+    bool Initialize() {
+        if (initialized_) return true;
+
+        // ====== I2S1 TX: MAX98357A 功放喇叭 ======
+        i2s_chan_config_t tx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
+        tx_chan_cfg.dma_desc_num = 6;
+        tx_chan_cfg.dma_frame_num = 240;
+        tx_chan_cfg.auto_clear_after_cb = true;
+        tx_chan_cfg.auto_clear_before_cb = false;
+        esp_err_t ret = i2s_new_channel(&tx_chan_cfg, &tx_handle_, nullptr);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "ExternalAudio: I2S1 TX channel failed: %s", esp_err_to_name(ret));
+            return false;
+        }
+
+        i2s_std_config_t tx_std_cfg = {
+            .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(EXTERNAL_AUDIO_SAMPLE_RATE),
+            .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+            .gpio_cfg = {
+                .mclk = I2S_GPIO_UNUSED,
+                .bclk = EXTERNAL_AUDIO_I2S_BCLK,
+                .ws   = EXTERNAL_AUDIO_I2S_WS,
+                .dout = EXTERNAL_AUDIO_I2S_DOUT,
+                .din  = I2S_GPIO_UNUSED,
+                .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
+            },
+        };
+        ret = i2s_channel_init_std_mode(tx_handle_, &tx_std_cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "ExternalAudio: I2S1 TX init failed: %s", esp_err_to_name(ret));
+            return false;
+        }
+
+        // ====== I2S1 RX: INMP441 MEMS 麦克风 ======
+        i2s_chan_config_t rx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
+        rx_chan_cfg.dma_desc_num = 6;
+        rx_chan_cfg.dma_frame_num = 240;
+        rx_chan_cfg.auto_clear_after_cb = true;
+        rx_chan_cfg.auto_clear_before_cb = false;
+        ret = i2s_new_channel(&rx_chan_cfg, nullptr, &rx_handle_);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "ExternalAudio: I2S1 RX channel failed: %s", esp_err_to_name(ret));
+            i2s_del_channel(tx_handle_);
+            tx_handle_ = nullptr;
+            return false;
+        }
+
+        i2s_std_config_t rx_std_cfg = {
+            .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(EXTERNAL_AUDIO_SAMPLE_RATE),
+            .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+            .gpio_cfg = {
+                .mclk = I2S_GPIO_UNUSED,
+                .bclk = EXTERNAL_AUDIO_I2S_BCLK,
+                .ws   = EXTERNAL_AUDIO_I2S_WS,
+                .dout = I2S_GPIO_UNUSED,
+                .din  = EXTERNAL_AUDIO_I2S_DIN,
+                .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
+            },
+        };
+        ret = i2s_channel_init_std_mode(rx_handle_, &rx_std_cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "ExternalAudio: I2S1 RX init failed: %s", esp_err_to_name(ret));
+            i2s_del_channel(tx_handle_);
+            i2s_del_channel(rx_handle_);
+            tx_handle_ = nullptr;
+            rx_handle_ = nullptr;
+            return false;
+        }
+
+        // 启用通道
+        i2s_channel_enable(tx_handle_);
+        i2s_channel_enable(rx_handle_);
+        initialized_ = true;
+        ESP_LOGI(TAG, "ExternalAudio: MAX98357A+INMP441 on I2S1 ready "
+                 "(BCLK=%d WS=%d DOUT=%d DIN=%d)",
+                 EXTERNAL_AUDIO_I2S_BCLK, EXTERNAL_AUDIO_I2S_WS,
+                 EXTERNAL_AUDIO_I2S_DOUT, EXTERNAL_AUDIO_I2S_DIN);
+        return true;
+    }
+
+    void Deinit() {
+        if (!initialized_) return;
+        i2s_channel_disable(tx_handle_);
+        i2s_channel_disable(rx_handle_);
+        i2s_del_channel(tx_handle_);
+        i2s_del_channel(rx_handle_);
+        tx_handle_ = nullptr;
+        rx_handle_ = nullptr;
+        initialized_ = false;
+    }
+
+    /** 播放一段 PCM 16bit 单声道音频（直接写入 I2S1 TX） */
+    bool Play(const int16_t* samples, int count) {
+        if (!initialized_ || !tx_handle_) return false;
+        size_t written = 0;
+        esp_err_t ret = i2s_channel_write(tx_handle_, samples,
+                                           count * sizeof(int16_t), &written, portMAX_DELAY);
+        return ret == ESP_OK;
+    }
+
+    /** 播放单个采样（可用于生成方波/正弦波等简单音效） */
+    bool PlaySample(int16_t sample) {
+        return Play(&sample, 1);
+    }
+
+    /** 从 INMP441 读取 PCM 音频 */
+    int Record(int16_t* buffer, int max_samples, uint32_t timeout_ms = 200) {
+        if (!initialized_ || !rx_handle_) return 0;
+        size_t bytes_read = 0;
+        esp_err_t ret = i2s_channel_read(rx_handle_, buffer,
+                                          max_samples * sizeof(int16_t), &bytes_read,
+                                          pdMS_TO_TICKS(timeout_ms));
+        if (ret != ESP_OK) return 0;
+        return (int)(bytes_read / sizeof(int16_t));
+    }
+
+    /** 停止 I2S TX（静音） */
+    void Stop() {
+        if (tx_handle_) i2s_channel_disable(tx_handle_);
+    }
+
+    /** 恢复 I2S TX */
+    void Resume() {
+        if (tx_handle_) i2s_channel_enable(tx_handle_);
+    }
+
+    bool IsInitialized() const { return initialized_; }
+
+private:
+    i2s_chan_handle_t tx_handle_ = nullptr;
+    i2s_chan_handle_t rx_handle_ = nullptr;
+    bool initialized_ = false;
+};
+
 // ============ 板型定义 ============
 class atk_dnesp32s3 : public WifiBoard {
 private:
@@ -969,6 +1193,7 @@ private:
     EspVideo* camera_;
     PCA9685* pca9685_;
     TB6612* motor_driver_;
+    ExternalAudio* external_audio_;
     PanTilt* pan_tilt_;
     WalleExpression* expression_;
     WalleEyes* eyes_;
@@ -1151,6 +1376,19 @@ private:
         ESP_LOGI(TAG, "TB6612 motor driver initialized");
     }
 
+    /** 初始化外接音频（I2S1 MAX98357A + INMP441） */
+    void InitializeExternalAudio() {
+        auto* ext = new ExternalAudio();
+        if (ext->Initialize()) {
+            external_audio_ = ext;
+            ESP_LOGI(TAG, "ExternalAudio: MAX98357A+INMP441 on I2S1 ready");
+        } else {
+            delete ext;
+            external_audio_ = nullptr;
+            ESP_LOGW(TAG, "ExternalAudio: hardware not detected — skipping");
+        }
+    }
+
     /** 初始化云台（PCA9685 模式） */
     void InitializePanTilt() {
         if (!pca9685_) {
@@ -1160,16 +1398,16 @@ private:
         }
         PanTilt::Config cfg;
         cfg.mode = PanTilt::DriverMode::PCA9685;
-        cfg.min_angle = HEAD_PAN_MIN;
-        cfg.max_angle = HEAD_PAN_MAX;
-        cfg.center_angle = HEAD_PAN_CENTER;
-        cfg.pca.pan_channel = SERVO_HEAD_PAN_CH;
-        cfg.pca.tilt_channel = SERVO_NECK_TILT_CH;
+        cfg.min_angle = NECK_LR_MIN;
+        cfg.max_angle = NECK_LR_MAX;
+        cfg.center_angle = NECK_LR_CENTER;
+        cfg.pca.pan_channel = SERVO_NECK_LR_CH;
+        cfg.pca.tilt_channel = SERVO_HEAD_UD_CH;
 
         pan_tilt_ = new PanTilt(cfg);
         pan_tilt_->SetPcaDriver(pca9685_);
-        ESP_LOGI(TAG, "PanTilt(PCA9685) initialized: head=CH%d, neck=CH%d",
-                 SERVO_HEAD_PAN_CH, SERVO_NECK_TILT_CH);
+        ESP_LOGI(TAG, "PanTilt(PCA9685) initialized: neck_lr=CH%d, head_ud=CH%d",
+                 SERVO_NECK_LR_CH, SERVO_HEAD_UD_CH);
     }
 
     /** 初始化 WALL-E 表情控制 */
@@ -1309,10 +1547,10 @@ private:
         // ============ 云台控制（3个） ============
 
         mcp.AddTool("self.head.look_at",
-            "控制WALL-E头部看向指定方向。pan控制左右（0=最左，90=正中，180=最右），tilt控制上下（45=最低，90=正中，135=最高）。",
+            "控制WALL-E头部看向指定方向。pan控制脖子左右（0=最左，90=正中，180=最右），tilt控制头上下（45=最低，90=正中，135=最高）。",
             PropertyList({
-                Property("pan", kPropertyTypeInteger, 90, (int)HEAD_PAN_MIN, (int)HEAD_PAN_MAX),
-                Property("tilt", kPropertyTypeInteger, 90, (int)NECK_TILT_MIN, (int)NECK_TILT_MAX)
+                Property("pan", kPropertyTypeInteger, 90, (int)NECK_LR_MIN, (int)NECK_LR_MAX),
+                Property("tilt", kPropertyTypeInteger, 90, (int)HEAD_UD_MIN, (int)HEAD_UD_MAX)
             }),
             [this](const PropertyList& props) -> ReturnValue {
                 float pan = (float)props["pan"].value<int>();
@@ -1325,7 +1563,7 @@ private:
             "WALL-E头部左右扫描搜索。",
             PropertyList(),
             [this](const PropertyList& props) -> ReturnValue {
-                pan_tilt_->StartSweep(HEAD_PAN_MIN, HEAD_PAN_MAX, NECK_TILT_CENTER);
+                pan_tilt_->StartSweep(NECK_LR_MIN, NECK_LR_MAX, HEAD_UD_CENTER);
                 return true;
             });
 
@@ -1431,6 +1669,7 @@ public:
         , camera_(nullptr)
         , pca9685_(nullptr)
         , motor_driver_(nullptr)
+        , external_audio_(nullptr)
         , pan_tilt_(nullptr)
         , expression_(nullptr)
         , eyes_(nullptr)
@@ -1441,6 +1680,7 @@ public:
         InitializeSpi();
         InitializeSt7789Display();
         InitializeButtons();
+        InitializeExternalAudio();  // fail-soft，硬件未接也不崩溃
         InitializeCamera();
         InitializePCA9685();
         InitializeMotor();
@@ -1499,6 +1739,7 @@ public:
     PCA9685* GetPca9685() { return pca9685_; }
     PanTilt* GetPanTilt() { return pan_tilt_; }
     TB6612* GetMotorDriver() { return motor_driver_; }
+    ExternalAudio* GetExternalAudio() { return external_audio_; }
     WalleExpression* GetWalleExpression() { return expression_; }
     VL53L0X* GetVl53l0x() { return tof_; }
     i2c_master_bus_handle_t GetI2cBus() { return i2c_bus_; }
@@ -1560,42 +1801,46 @@ extern "C" {
     // 表情控制（直接调用 PCA9685）
     void walle_expression_playHappy() {
         auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
-        auto* pca = board->GetPca9685();
-        if (pca) { pca->SetServoAngle(2, 45); pca->SetServoAngle(3, 135); }
+        auto* expr = board->GetWalleExpression();
+        if (expr) expr->SetExpression(WalleExpression::kHappy);
     }
     void walle_expression_playSad() {
         auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
-        auto* pca = board->GetPca9685();
-        if (pca) { pca->SetServoAngle(2, 135); pca->SetServoAngle(3, 45); }
+        auto* expr = board->GetWalleExpression();
+        if (expr) expr->SetExpression(WalleExpression::kSad);
     }
     void walle_expression_playSurprised() {
         auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
-        auto* pca = board->GetPca9685();
-        if (pca) { pca->SetServoAngle(2, 90); pca->SetServoAngle(3, 90); }
+        auto* expr = board->GetWalleExpression();
+        if (expr) expr->SetExpression(WalleExpression::kScared);
     }
     void walle_expression_playAngry() {
         auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
-        auto* pca = board->GetPca9685();
-        if (pca) { pca->SetServoAngle(2, 60); pca->SetServoAngle(3, 120); }
+        auto* expr = board->GetWalleExpression();
+        if (expr) {
+            expr->SetExpression(WalleExpression::kScared);
+            auto* eyes = board->GetWalleEyes();
+            if (eyes) { eyes->SetColor(Gc9a01Eyes::Color::Red()); eyes->SetMode(Gc9a01Eyes::kAngry); }
+        }
     }
     void walle_expression_playSleepy() {
         auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
-        auto* pca = board->GetPca9685();
-        if (pca) { pca->SetServoAngle(2, 75); pca->SetServoAngle(3, 105); }
+        auto* expr = board->GetWalleExpression();
+        if (expr) expr->SetExpression(WalleExpression::kSad);
     }
     void walle_expression_playWave() {
         auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
-        auto* pca = board->GetPca9685();
-        if (pca) { pca->SetServoAngle(4, 180); vTaskDelay(pdMS_TO_TICKS(500)); pca->SetServoAngle(4, 0); }
+        auto* expr = board->GetWalleExpression();
+        if (expr) expr->SetExpression(WalleExpression::kWave);
     }
     
-    // 舵机控制（5个舵机：CH0-CH4）
+    // 舵机控制（9个舵机：CH0-CH8）
     void walle_servo_setAngle(int channel, int angle) {
         auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
         auto* pca = board->GetPca9685();
-        if (channel == 0) { auto* pt = board->GetPanTilt(); if (pt) pt->SetPanAngle(angle); }
-        else if (channel == 1) { auto* pt = board->GetPanTilt(); if (pt) pt->SetTiltAngle(angle); }
-        else if (pca) pca->SetServoAngle(channel, angle);
+        if (pca && channel >= 0 && channel < SERVO_COUNT) {
+            pca->SetServoAngle(channel, angle);
+        }
     }
     
     // 电机控制（速度 -255~255）
@@ -1623,6 +1868,56 @@ extern "C" {
         auto* tof = board->GetVl53l0x();
         if (tof) return (uint16_t)tof->ReadDistanceMm();
         return 0;
+    }
+    
+    // ============ 外接音频（MAX98357A + INMP441, I2S1）============
+    
+    bool walle_external_audio_ready() {
+        auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
+        auto* audio = board->GetExternalAudio();
+        return audio && audio->IsInitialized();
+    }
+    
+    // 播放 PCM 音频数据（16bit, single channel, sample_rate=EXTERNAL_AUDIO_SAMPLE_RATE）
+    bool walle_external_audio_play(const int16_t* samples, int count) {
+        auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
+        auto* audio = board->GetExternalAudio();
+        if (!audio || !audio->IsInitialized()) return false;
+        return audio->Play(samples, count);
+    }
+    
+    // 从 INMP441 录音
+    int walle_external_audio_record(int16_t* buffer, int max_samples, uint32_t timeout_ms) {
+        auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
+        auto* audio = board->GetExternalAudio();
+        if (!audio || !audio->IsInitialized()) return 0;
+        return audio->Record(buffer, max_samples, timeout_ms);
+    }
+    
+    // 播放蜂鸣音效（方波，频率Hz，时长ms）
+    void walle_external_audio_beep(int freq_hz, int duration_ms) {
+        auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
+        auto* audio = board->GetExternalAudio();
+        if (!audio || !audio->IsInitialized()) return;
+        
+        int sample_rate = EXTERNAL_AUDIO_SAMPLE_RATE;
+        int total_samples = sample_rate * duration_ms / 1000;
+        int period_samples = sample_rate / freq_hz;
+        if (period_samples < 2) period_samples = 2;
+        
+        // 预生成一个周期
+        std::vector<int16_t> wave(period_samples);
+        for (int i = 0; i < period_samples; i++) {
+            wave[i] = (i < period_samples / 2) ? 12000 : -12000;
+        }
+        
+        // 循环播放
+        int remaining = total_samples;
+        while (remaining > 0) {
+            int chunk = (remaining > period_samples) ? period_samples : remaining;
+            audio->Play(wave.data(), chunk);
+            remaining -= chunk;
+        }
     }
     
     // 系统重启

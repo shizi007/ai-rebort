@@ -3,7 +3,7 @@
 
 #include <driver/gpio.h>
 
-// ============ 音频（同 WALL-E 版） ============
+// ============ 板载音频（ES8388 codec, I2S0） ============
 #define AUDIO_INPUT_SAMPLE_RATE      24000
 #define AUDIO_OUTPUT_SAMPLE_RATE     24000
 
@@ -60,18 +60,35 @@
 #define OV_PWDN_IO      4
 #define OV_RESET_IO     5
 
-// ============ WALL-E 舵机配置（PCA9685 I2C 驱动） ============
+// ============ WALL-E 舵机配置（PCA9685 I2C 驱动，9舵机） ============
+// 电源：12V 输入 → DC-DC 10-36V 降压模块 → 5V 输出 → 全系统供电
+// PCA9685 I2C 地址 0x40，50Hz 舵机频率
 #define PCA9685_I2C_ADDR      0x40
 #define PCA9685_SERVO_FREQ_HZ 50.0f
 
-#define SERVO_HEAD_PAN_CH     0
-#define SERVO_NECK_TILT_CH    1
-#define SERVO_LEFT_ARM_CH     2
-#define SERVO_RIGHT_ARM_CH    3
-#define SERVO_SPARE_CH        4
+// 眼睛舵机（CH0-1）
+#define SERVO_L_EYE_CH       0    // 左眼
+#define SERVO_R_EYE_CH       1    // 右眼
 
-#define MOTOR_LEFT_PWM_CH     5
-#define MOTOR_RIGHT_PWM_CH    6
+// 头部和脖子舵机（CH2-4）
+#define SERVO_NECK_LR_CH     2    // 脖子左右转动
+#define SERVO_HEAD_UD_CH     3    // 头部上下
+#define SERVO_NECK_OI_CH     4    // 脖子伸缩回
+
+// 手臂舵机（CH5-6）
+#define SERVO_L_ARM_CH       5    // 左手
+#define SERVO_R_ARM_CH       6    // 右手
+
+// 眉毛舵机（新增，CH7-8）
+#define SERVO_L_BROW_CH      7    // 左眉毛
+#define SERVO_R_BROW_CH      8    // 右眉毛
+
+// 舵机总数
+#define SERVO_COUNT          9
+
+// 电机 PWM 通道（CH9-10，紧接舵机之后）
+#define MOTOR_LEFT_PWM_CH     9
+#define MOTOR_RIGHT_PWM_CH    10
 
 // ============ GC9A01 圆形屏眼睛（共享主屏 SPI 总线，7针无BL） ============
 // 复用 LCD 的 SCLK(GPIO12) / MOSI(GPIO11) / DC(GPIO40)
@@ -91,6 +108,17 @@
 #define TRACK_TOO_CLOSE_MM         400.0f
 #define TRACK_TOO_FAR_MM           1500.0f
 
+// ============ 外接音频（I2S1, MAX98357A 功放喇叭 + INMP441 MEMS 麦克风） ============
+// 共享 BCLK / WS，独立数据线
+// MAX98357A: BCLK, LRCLK(WS), DIN → 喇叭（无需 MCLK，内部 PLL）
+// INMP441:   SCK(BCLK), WS, SD(DOUT) → ESP32-S3 DIN（无需 MCLK）
+// ESP32-S3 I2S1 控制器，Master 模式
+#define EXTERNAL_AUDIO_I2S_BCLK  GPIO_NUM_26
+#define EXTERNAL_AUDIO_I2S_WS    GPIO_NUM_27
+#define EXTERNAL_AUDIO_I2S_DOUT  GPIO_NUM_28  // ESP→MAX98357A DIN
+#define EXTERNAL_AUDIO_I2S_DIN   GPIO_NUM_29  // INMP441 DOUT→ESP
+#define EXTERNAL_AUDIO_SAMPLE_RATE  24000
+
 // ============ 眼睛渲染参数 ============
 #define EYE_IRIS_RADIUS         50
 #define EYE_PUPIL_RADIUS        20
@@ -105,18 +133,39 @@
 #define TB6612_BIN1_GPIO    GPIO_NUM_19
 #define TB6612_BIN2_GPIO    GPIO_NUM_20
 
-// ============ 舵机角度范围 ============
-#define HEAD_PAN_MIN        30.0f
-#define HEAD_PAN_MAX        150.0f
-#define HEAD_PAN_CENTER     90.0f
+// ============ 各舵机角度范围 ============
 
-#define NECK_TILT_MIN       45.0f
-#define NECK_TILT_MAX       135.0f
-#define NECK_TILT_CENTER    90.0f
+// 脖子左右转动 (NECK_LR, CH2)
+#define NECK_LR_MIN        30.0f
+#define NECK_LR_MAX        150.0f
+#define NECK_LR_CENTER     90.0f
 
+// 头部上下 (HEAD_UD, CH3)
+#define HEAD_UD_MIN        45.0f
+#define HEAD_UD_MAX        135.0f
+#define HEAD_UD_CENTER     90.0f
+
+// 脖子伸缩回 (NECK_OI, CH4)
+#define NECK_OI_MIN        20.0f
+#define NECK_OI_MAX        160.0f
+#define NECK_OI_CENTER     90.0f
+
+// 左右手臂 (ARM, CH5-6)
 #define ARM_MIN             20.0f
 #define ARM_MAX             160.0f
 #define ARM_LEFT_CENTER     70.0f
 #define ARM_RIGHT_CENTER    110.0f
+
+// 眼睛 (EYE, CH0-1)
+#define EYE_MIN             30.0f
+#define EYE_MAX             150.0f
+#define EYE_LEFT_CENTER     90.0f
+#define EYE_RIGHT_CENTER    90.0f
+
+// 眉毛 (BROW, CH7-8) — 小角度摆动
+#define BROW_MIN            45.0f
+#define BROW_MAX            135.0f
+#define BROW_LEFT_CENTER    90.0f
+#define BROW_RIGHT_CENTER   90.0f
 
 #endif // _BOARD_CONFIG_H_

@@ -17,6 +17,7 @@
  */
 
 #include "walle_debug_server.h"
+#include "boards/atk-dnesp32s3/config.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -50,6 +51,12 @@ extern "C" {
     uint16_t walle_vl53l0x_readRange();
     void walle_system_restart();
     char* walle_i2c_scan_json();
+
+    // 外接音频（MAX98357A + INMP441, I2S1）
+    bool walle_external_audio_ready();
+    bool walle_external_audio_play(const int16_t* samples, int count);
+    int walle_external_audio_record(int16_t* buffer, int max_samples, uint32_t timeout_ms);
+    void walle_external_audio_beep(int freq_hz, int duration_ms);
 }
 
 
@@ -207,17 +214,17 @@ static esp_err_t servo_handler(httpd_req_t *req) {
     int channel = ch->valueint;
     int angle_val = angle->valueint;
     
-    // 限制范围
-    if (channel < 0 || channel > 4) {
+    // 限制范围（9个舵机：CH0-CH8）
+    if (channel < 0 || channel > 8) {
         cJSON_Delete(root);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid channel (0-4)");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid channel (0-8)");
         return ESP_FAIL;
     }
     if (angle_val < 0 || angle_val > 180) {
         angle_val = 90;  // 默认归中
     }
     
-    // 控制舵机（5个舵机：CH0-CH4）
+    // 控制舵机（9个舵机：CH0-CH8）
     walle_servo_setAngle(channel, angle_val);
     
     ESP_LOGI(TAG, "Servo %d set to %d degrees", channel, angle_val);
@@ -441,9 +448,9 @@ static esp_err_t expression_handler(httpd_req_t *req) {
 static esp_err_t stop_handler(httpd_req_t *req) {
     ESP_LOGW(TAG, "EMERGENCY STOP triggered!");
     
-    // 停止所有电机 + 舵机归中 + 眼睛灯关闭
+    // 停止所有电机 + 全部9舵机归中 + 眼睛灯关闭
     walle_emergency_stop();
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < SERVO_COUNT; i++) {
         walle_servo_setAngle(i, 90);
     }
     walle_eyes_turnOff();
