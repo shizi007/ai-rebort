@@ -65,6 +65,7 @@ bool Application::SetDeviceState(DeviceState state) {
 
 void Application::Initialize() {
     auto& board = Board::GetInstance();
+    ESP_LOGI(TAG, "DBG: Board created OK");
     SetDeviceState(kDeviceStateStarting);
 
     // Setup the display

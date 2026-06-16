@@ -52,11 +52,6 @@ extern "C" {
     void walle_system_restart();
     char* walle_i2c_scan_json();
 
-    // 外接音频（MAX98357A + INMP441, I2S1）
-    bool walle_external_audio_ready();
-    bool walle_external_audio_play(const int16_t* samples, int count);
-    int walle_external_audio_record(int16_t* buffer, int max_samples, uint32_t timeout_ms);
-    void walle_external_audio_beep(int freq_hz, int duration_ms);
 }
 
 

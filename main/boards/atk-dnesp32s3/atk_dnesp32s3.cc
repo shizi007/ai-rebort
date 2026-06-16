@@ -1,43 +1,47 @@
 ﻿/*
  * 正点原子 ATK-DNESP32S3  瓦利机器人版
- * 
- * 基于基础版 atk_dnesp32s3 机器人：
- *   - PCA9685 I2C 16路PWM驱动板（9个舵机 + 2路电机PWM）
- *   - TB6612 双路直流电机驱动（2个JGB37-520减速电机，12V/200RPM，履带行走）
- *   - PanTilt 云台（脖子左右 + 头部上下 + 脖子伸缩，PCA9685 模式）
- *   - 双臂舵机控制（左臂 + 右臂）
- *   - 双眼 GC9A01 240x240 圆形TFT屏（共享主屏SPI总线，像素级表情渲染）
- *   - VL53L0X 激光测距（I2C，精确距离控制，替代视觉估算）
- *   - PersonTracker 人物追踪器（拍照→AI分析→云台跟踪+底盘跟随+激光测距）
- *   - 外放喇叭（ES8388 OUT2→NS4150功放→喇叭）
- *   - 电源：12V输入→DC-DC 10-36V降压模块→5V全系统供电
- *   - 17 个 MCP 工具，支持语音控制
- * 
- * 硬件：ATK-DNESP32S3 + OV2640 + PCA9685 + TB6612 + VL53L0X + NS4150 + SG90×9 + JGB37-520×2 + 喇叭 + GC9A01×2 + MAX98357A + INMP441
- * 
- * 舵机接线（PCA9685）：
- *   CH0 — 左眼
- *   CH1 — 右眼
- *   CH2 — 脖子左右转动 (NECK_LR)
- *   CH3 — 头部上下 (HEAD_UD)
- *   CH4 — 脖子伸缩回 (NECK_OI)
- *   CH5 — 左臂 (L_ARM)
- *   CH6 — 右臂 (R_ARM)
- *   CH7 — 左眉毛 (L_BROW)
- *   CH8 — 右眉毛 (R_BROW)
- * 
- * 电机接线（TB6612）：
- *   AIN1=GPIO2, AIN2=GPIO8, PWMA=PCA9685_CH9（左电机）
- *   BIN1=GPIO19, BIN2=GPIO20, PWMB=PCA9685_CH10（右电机）
- * 
- * 眼睛接线（GC9A01 7针，共享主屏 SPI 总线）：
- *   SCLK/MOSI/DC 复用于主屏(GPIO12/11/40)，CS_LEFT=GPIO44, CS_RIGHT=GPIO1
+ *
+ * 基于基础版 atk_dnesp32s3 机器人:
+ *   - PCA9685 I2C 16路PWM驱动板(9个舵机 + 2路电机PWM)
+ *   - TB6612 双路直流电机驱动(2个JGB37-520减速电机,12V/200RPM,履带行走)
+ *   - PanTilt 云台(脖子左右 + 头部上下 + 脖子伸缩,PCA9685 模式)
+ *   - 双臂舵机控制(左臂 + 右臂)
+ *   - 双眼 GC9A01 240x240 圆形TFT屏(共享主屏SPI总线,像素级表情渲染)
+ *   - VL53L0X 激光测距(I2C,精确距离控制,替代视觉估算)
+ *   - PersonTracker 人物追踪器(拍照→AI分析→云台跟踪+底盘跟随+激光测距)
+ *   - 外放喇叭(ES8388 OUT2→NS4150功放→喇叭)
+ *   - 电源:12V输入→DC-DC 10-36V降压模块→5V全系统供电
+ *   - 17 个 MCP 工具,支持语音控制
+ *
+ * 硬件:ATK-DNESP32S3 + OV2640 + PCA9685 + TB6612 + VL53L0X + NS4150 + SG90×9 + JGB37-520×2 + 喇叭 + GC9A01×2
+ *
+ * 舵机接线(PCA9685):
+ *   CH0 - 左眼
+ *   CH1 - 右眼
+ *   CH2 - 脖子左右转动 (NECK_LR)
+ *   CH3 - 头部上下 (HEAD_UD)
+ *   CH4 - 脖子伸缩回 (NECK_OI)
+ *   CH5 - 左臂 (L_ARM)
+ *   CH6 - 右臂 (R_ARM)
+ *   CH7 - 左眉毛 (L_BROW)
+ *   CH8 - 右眉毛 (R_BROW)
+ *
+ * 电机接线(TB6612):
+ *   AIN1=XL9555 P00, AIN2=XL9555 P01, PWMA=PCA9685_CH9(左电机)
+ *   BIN1=XL9555 P06, BIN2=XL9555 P07, PWMB=PCA9685_CH10(右电机)
+ *
+ * 眼睛接线(GC9A01 7针,共享主屏 SPI 总线):
+ *   SCLK/MOSI/DC 复用于主屏(GPIO12/11/40),CS_LEFT=XL9555 P02, CS_RIGHT=XL9555 P03
  *   RST=RC上电复位(10K→3.3V+100nF→GND), BL=3.3V常亮
- * 
- * 喇叭接线：
- *   ES8388 OUT2 → NS4150 功放 → 喇叭（8Ω 1W）
- * 
- * 供电方案：
+ *
+ * 外部 I2C 总线(GPIO38/39,与摄像头SCCB共享):
+ *   PCA9685 (0x40) + VL53L0X (0x29) + OV2640 SCCB (0x3C)
+ *   PCA9685 和 VL53L0X 的 SDA/SCL 需物理连到 GPIO38/39 排针
+ *
+ * 喇叭接线:
+ *   ES8388 OUT2 → NS4150 功放 → 喇叭(8Ω 1W)
+ *
+ * 供电方案:
  *   18650×2 (7.4V) → LM2596 5V/3A → ESP32-S3 + PCA9685 + TB6612 + NS4150
  */
 
@@ -54,6 +58,7 @@
 #include "pca9685.h"
 #include "tb6612.h"
 #include "mcp_server.h"
+#include "walle_debug_server.h"
 
 #include <esp_log.h>
 #include <esp_lcd_panel_vendor.h>
@@ -71,11 +76,15 @@
 
 #define TAG "atk_dnesp32s3"
 
-// ============ XL9555 IO 扩展芯片（同基础版） ============
+// ============ XL9555 IO 扩展芯片(同基础版) ============
 class XL9555 : public I2cDevice {
 public:
     XL9555(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : I2cDevice(i2c_bus, addr) {
-        WriteReg(0x06, 0x03);
+        // 端口0方向寄存器(0x06): 0=输出, 1=输入
+        // P00=AIN1(出), P01=AIN2(出), P02=CS_L(出), P03=CS_R(出),
+        // P04=CAM_PWDN(出), P05=CAM_RESET(出), P06=BIN1(出), P07=BIN2(出)
+        WriteReg(0x06, 0x00);  // P00-P07 全部输出
+        // 端口1方向寄存器(0x07): P08=LCD_BL(出), P09-P11=保留(出), P12-P15=输入
         WriteReg(0x07, 0xF0);
     }
 
@@ -100,8 +109,8 @@ public:
     }
 };
 
-// ============ GC9A01 圆形屏眼睛（SPI 独立总线） ============
-// ============ GC9A01 圆形屏眼睛（SPI 独立总线） ============
+// ============ GC9A01 圆形屏眼睛(SPI 独立总线) ============
+// ============ GC9A01 圆形屏眼睛(SPI 独立总线) ============
 class Gc9a01Eyes {
 public:
     enum EyeMode {
@@ -144,7 +153,7 @@ public:
         if (panel_right_) esp_lcd_panel_del(panel_right_);
         if (io_left_)     esp_lcd_panel_io_del(io_left_);
         if (io_right_)    esp_lcd_panel_io_del(io_right_);
-        // 注意：不释放 SPI 总线，因为与主屏共享
+        // 注意:不释放 SPI 总线,因为与主屏共享
         if (fb_left_)  heap_caps_free(fb_left_);
         if (fb_right_) heap_caps_free(fb_right_);
     }
@@ -244,7 +253,7 @@ private:
     }
 
     // ======== 画眼睛 ========
-    // 中心点：(cx, cy)，眼白半径 r，虹膜颜色 iris
+    // 中心点:(cx, cy),眼白半径 r,虹膜颜色 iris
     void RenderEye(uint16_t* fb, int cx, int cy, int r, Color iris, float lid_pct) {
         ClearFb(fb);
         // 1) 眼白
@@ -258,7 +267,7 @@ private:
         // 4) 高光
         FillCircle(fb, cx + 12, cy - 14, EYE_HIGHLIGHT_RADIUS, RGB565(255, 255, 255));
         FillCircle(fb, cx + 8,  cy - 10, 4, RGB565(255, 255, 255));
-        // 5) 上眼睑（从顶部覆盖）
+        // 5) 上眼睑(从顶部覆盖)
         if (lid_pct > 0.001f) {
             int lid_h = (int)((float)(r * 2) * lid_pct);
             uint16_t lid_c = RGB565(EYE_LID_COLOR_R, EYE_LID_COLOR_G, EYE_LID_COLOR_B);
@@ -278,7 +287,7 @@ private:
 
     void RenderAngryEyes() {
         Color r = Color::Red();
-        // 生气：瞳孔缩小+上移，上眼睑下压成 V 形
+        // 生气:瞳孔缩小+上移,上眼睑下压成 V 形
         int iris_r = EYE_IRIS_RADIUS - 5;
         for (auto* fb : {fb_left_, fb_right_}) {
             ClearFb(fb);
@@ -299,7 +308,7 @@ private:
     }
 
     // ======== SPI 面板初始化 ========
-    // 返回 true=成功, false=失败（非致命，屏没接也能跑）
+    // 返回 true=成功, false=失败(非致命,屏没接也能跑)
     bool InitPanel(gpio_num_t cs, esp_lcd_panel_io_handle_t& io, esp_lcd_panel_handle_t& panel) {
         esp_lcd_panel_io_spi_config_t io_cfg = {};
         io_cfg.cs_gpio_num = cs;
@@ -339,7 +348,7 @@ private:
 
         ret = esp_lcd_panel_init(panel);
         if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Eye CS=%d: panel init failed (err=0x%x) — display not connected?", cs, ret);
+            ESP_LOGW(TAG, "Eye CS=%d: panel init failed (err=0x%x) - display not connected?", cs, ret);
             esp_lcd_panel_del(panel);
             esp_lcd_panel_io_del(io);
             panel = nullptr; io = nullptr;
@@ -358,7 +367,7 @@ private:
         bool right_ok = InitPanel(cs_right_, io_right_, panel_right_);
         // AllocFramebuffers 前置的条件检查
         if (!left_ok && !right_ok) {
-            ESP_LOGW(TAG, "No GC9A01 eyes detected — running headless");
+            ESP_LOGW(TAG, "No GC9A01 eyes detected - running headless");
             return;
         }
         if (!left_ok)  { ESP_LOGW(TAG, "Left eye missing, right eye only"); }
@@ -497,7 +506,7 @@ public:
 
     void SetExpression(Expression expr) {
         current_expr_ = expr;
-        // 眼睛联动（颜色+模式）
+        // 眼睛联动(颜色+模式)
         if (eyes_) {
             switch (expr) {
                 case kHappy:   eyes_->SetColor(WalleEyes::Color::WarmYellow()); eyes_->SetMode(WalleEyes::kOn); eyes_->SetBrightness(1.0f); break;
@@ -509,7 +518,7 @@ public:
                 default:       eyes_->SetColor(WalleEyes::Color::WarmYellow()); eyes_->SetMode(WalleEyes::kOn); eyes_->SetBrightness(0.6f); break;
             }
         }
-        // 全关节联动（9舵机）
+        // 全关节联动(9舵机)
         switch (expr) {
             case kHappy:
                 SetArmLeft(40.0f);
@@ -681,7 +690,7 @@ public:
         : i2c_bus_(i2c_bus), addr_(addr), last_distance_mm_(0), initialized_(false) {}
 
     bool Init() {
-        // 检测设备是否在线：读取 VL53L0X 标识寄存器 0x00C0
+        // 检测设备是否在线:读取 VL53L0X 标识寄存器 0x00C0
         // 期望值: 0xEEAA (VL53L0X identification)
         uint8_t id_buf[2] = {0xC0, 0x00};
         uint8_t data[2] = {0};
@@ -706,8 +715,8 @@ public:
             return false;
         }
 
-        // 初始化序列：设置信号速率、VCSEL 脉冲周期、测量预算
-        // 简化初始化 — 写入必要寄存器使传感器进入测距模式
+        // 初始化序列:设置信号速率、VCSEL 脉冲周期、测量预算
+        // 简化初始化 - 写入必要寄存器使传感器进入测距模式
         WriteReg16(0x0080, 0x0001);  // SYSRANGE_START bit0=1 (单次测距)
         WriteReg16(0x0083, 0x0004);  // SYSTEM_INTERRUPT_CONFIG_GPIO = 4 (new sample ready)
 
@@ -716,14 +725,14 @@ public:
         return true;
     }
 
-    /** 读取距离（毫米），失败返回 -1 */
+    /** 读取距离(毫米),失败返回 -1 */
     int ReadDistanceMm() {
         if (!initialized_) return -1;
 
         // 启动单次测距
         WriteReg16(0x0018, 0x0001);
 
-        // 等待测量完成（轮询方式，最大 30ms）
+        // 等待测量完成(轮询方式,最大 30ms)
         bool ready = false;
         for (int i = 0; i < 30; i++) {
             uint8_t status = 0;
@@ -758,7 +767,7 @@ public:
         return distance;
     }
 
-    /** 带中值滤波的读取（3次采样取中值，抗干扰） */
+    /** 带中值滤波的读取(3次采样取中值,抗干扰) */
     int ReadDistanceMmFiltered() {
         int d1 = ReadDistanceMm();
         vTaskDelay(pdMS_TO_TICKS(5));
@@ -796,7 +805,7 @@ private:
     bool initialized_ = false;
 };
 
-// ============ 人物追踪器（WALL-E 增强：云台+底盘跟随+激光测距） ============
+// ============ 人物追踪器(WALL-E 增强:云台+底盘跟随+激光测距) ============
 class PersonTracker {
 public:
     struct TrackResult {
@@ -804,7 +813,7 @@ public:
         float center_x = 0.5f;
         float center_y = 0.5f;
         float confidence = 0.0f;
-        int distance_mm = -1;  // VL53L0X 测距结果，-1=不可用
+        int distance_mm = -1;  // VL53L0X 测距结果,-1=不可用
     };
 
     PersonTracker(PanTilt* pan_tilt, Camera* camera, TB6612* motor, PCA9685* pca, VL53L0X* tof)
@@ -814,7 +823,7 @@ public:
         StopTracking();
     }
 
-    /** 单次追踪：拍照 → AI分析 → 测距 → 驱动云台+底盘 */
+    /** 单次追踪:拍照 → AI分析 → 测距 → 驱动云台+底盘 */
     bool TrackOnce() {
         if (!camera_->Capture()) {
             ESP_LOGE(TAG, "Camera capture failed");
@@ -833,7 +842,7 @@ public:
         auto result_str = camera_->Explain(question);
         auto track_result = ParseTrackResult(result_str);
 
-        // 读取 VL53L0X 测距（如果可用）
+        // 读取 VL53L0X 测距(如果可用)
         if (tof_ && tof_->IsInitialized()) {
             track_result.distance_mm = tof_->ReadDistanceMmFiltered();
             ESP_LOGI(TAG, "VL53L0X distance: %d mm", track_result.distance_mm);
@@ -976,31 +985,31 @@ private:
         float left_speed = 0;
         float right_speed = 0;
 
-        // ======= 距离控制（优先使用 VL53L0X 激光测距） =======
+        // ======= 距离控制(优先使用 VL53L0X 激光测距) =======
         float base_speed = follow_speed_;  // 默认速度
 
         if (result.distance_mm > 0) {
-            // 有激光测距数据 — 精确距离控制
+            // 有激光测距数据 - 精确距离控制
             if (result.distance_mm < TRACK_TOO_CLOSE_MM) {
-                // 太近！停止或后退
+                // 太近!停止或后退
                 base_speed = 0.0f;
                 ESP_LOGD(TAG, "Too close: %dmm, stopping", result.distance_mm);
             } else if (result.distance_mm < TRACK_FOLLOW_DIST_MM - TRACK_DIST_TOLERANCE_MM) {
-                // 偏近，慢速跟随
+                // 偏近,慢速跟随
                 base_speed = follow_speed_ * 0.3f;
             } else if (result.distance_mm > TRACK_TOO_FAR_MM) {
-                // 太远，加速追
+                // 太远,加速追
                 base_speed = follow_speed_ * 1.3f;
                 ESP_LOGD(TAG, "Too far: %dmm, speeding up", result.distance_mm);
             } else if (result.distance_mm > TRACK_FOLLOW_DIST_MM + TRACK_DIST_TOLERANCE_MM) {
-                // 偏远，正常速度
+                // 偏远,正常速度
                 base_speed = follow_speed_;
             } else {
-                // 距离合适，低速维持
+                // 距离合适,低速维持
                 base_speed = follow_speed_ * 0.15f;
             }
         } else {
-            // 无激光测距 — 回退到视觉估算（兼容无 VL53L0X 的情况）
+            // 无激光测距 - 回退到视觉估算(兼容无 VL53L0X 的情况)
             float dy = result.center_y - 0.5f;
             if (std::abs(dx) < 0.15f && dy > 0.2f) {
                 base_speed = follow_speed_ * 0.3f;  // 人在画面下方≈近
@@ -1043,157 +1052,21 @@ private:
     TrackResult last_result_;
 };
 
-// ============ 外接音频（MAX98357A + INMP441, I2S1） ============
-class ExternalAudio {
-public:
-    ExternalAudio() {}
-    ~ExternalAudio() { Deinit(); }
-
-    bool Initialize() {
-        if (initialized_) return true;
-
-        // ====== I2S1 TX: MAX98357A 功放喇叭 ======
-        i2s_chan_config_t tx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
-        tx_chan_cfg.dma_desc_num = 6;
-        tx_chan_cfg.dma_frame_num = 240;
-        tx_chan_cfg.auto_clear_after_cb = true;
-        tx_chan_cfg.auto_clear_before_cb = false;
-        esp_err_t ret = i2s_new_channel(&tx_chan_cfg, &tx_handle_, nullptr);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "ExternalAudio: I2S1 TX channel failed: %s", esp_err_to_name(ret));
-            return false;
-        }
-
-        i2s_std_config_t tx_std_cfg = {
-            .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(EXTERNAL_AUDIO_SAMPLE_RATE),
-            .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
-            .gpio_cfg = {
-                .mclk = I2S_GPIO_UNUSED,
-                .bclk = EXTERNAL_AUDIO_I2S_BCLK,
-                .ws   = EXTERNAL_AUDIO_I2S_WS,
-                .dout = EXTERNAL_AUDIO_I2S_DOUT,
-                .din  = I2S_GPIO_UNUSED,
-                .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
-            },
-        };
-        ret = i2s_channel_init_std_mode(tx_handle_, &tx_std_cfg);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "ExternalAudio: I2S1 TX init failed: %s", esp_err_to_name(ret));
-            return false;
-        }
-
-        // ====== I2S1 RX: INMP441 MEMS 麦克风 ======
-        i2s_chan_config_t rx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
-        rx_chan_cfg.dma_desc_num = 6;
-        rx_chan_cfg.dma_frame_num = 240;
-        rx_chan_cfg.auto_clear_after_cb = true;
-        rx_chan_cfg.auto_clear_before_cb = false;
-        ret = i2s_new_channel(&rx_chan_cfg, nullptr, &rx_handle_);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "ExternalAudio: I2S1 RX channel failed: %s", esp_err_to_name(ret));
-            i2s_del_channel(tx_handle_);
-            tx_handle_ = nullptr;
-            return false;
-        }
-
-        i2s_std_config_t rx_std_cfg = {
-            .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(EXTERNAL_AUDIO_SAMPLE_RATE),
-            .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
-            .gpio_cfg = {
-                .mclk = I2S_GPIO_UNUSED,
-                .bclk = EXTERNAL_AUDIO_I2S_BCLK,
-                .ws   = EXTERNAL_AUDIO_I2S_WS,
-                .dout = I2S_GPIO_UNUSED,
-                .din  = EXTERNAL_AUDIO_I2S_DIN,
-                .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
-            },
-        };
-        ret = i2s_channel_init_std_mode(rx_handle_, &rx_std_cfg);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "ExternalAudio: I2S1 RX init failed: %s", esp_err_to_name(ret));
-            i2s_del_channel(tx_handle_);
-            i2s_del_channel(rx_handle_);
-            tx_handle_ = nullptr;
-            rx_handle_ = nullptr;
-            return false;
-        }
-
-        // 启用通道
-        i2s_channel_enable(tx_handle_);
-        i2s_channel_enable(rx_handle_);
-        initialized_ = true;
-        ESP_LOGI(TAG, "ExternalAudio: MAX98357A+INMP441 on I2S1 ready "
-                 "(BCLK=%d WS=%d DOUT=%d DIN=%d)",
-                 EXTERNAL_AUDIO_I2S_BCLK, EXTERNAL_AUDIO_I2S_WS,
-                 EXTERNAL_AUDIO_I2S_DOUT, EXTERNAL_AUDIO_I2S_DIN);
-        return true;
-    }
-
-    void Deinit() {
-        if (!initialized_) return;
-        i2s_channel_disable(tx_handle_);
-        i2s_channel_disable(rx_handle_);
-        i2s_del_channel(tx_handle_);
-        i2s_del_channel(rx_handle_);
-        tx_handle_ = nullptr;
-        rx_handle_ = nullptr;
-        initialized_ = false;
-    }
-
-    /** 播放一段 PCM 16bit 单声道音频（直接写入 I2S1 TX） */
-    bool Play(const int16_t* samples, int count) {
-        if (!initialized_ || !tx_handle_) return false;
-        size_t written = 0;
-        esp_err_t ret = i2s_channel_write(tx_handle_, samples,
-                                           count * sizeof(int16_t), &written, portMAX_DELAY);
-        return ret == ESP_OK;
-    }
-
-    /** 播放单个采样（可用于生成方波/正弦波等简单音效） */
-    bool PlaySample(int16_t sample) {
-        return Play(&sample, 1);
-    }
-
-    /** 从 INMP441 读取 PCM 音频 */
-    int Record(int16_t* buffer, int max_samples, uint32_t timeout_ms = 200) {
-        if (!initialized_ || !rx_handle_) return 0;
-        size_t bytes_read = 0;
-        esp_err_t ret = i2s_channel_read(rx_handle_, buffer,
-                                          max_samples * sizeof(int16_t), &bytes_read,
-                                          pdMS_TO_TICKS(timeout_ms));
-        if (ret != ESP_OK) return 0;
-        return (int)(bytes_read / sizeof(int16_t));
-    }
-
-    /** 停止 I2S TX（静音） */
-    void Stop() {
-        if (tx_handle_) i2s_channel_disable(tx_handle_);
-    }
-
-    /** 恢复 I2S TX */
-    void Resume() {
-        if (tx_handle_) i2s_channel_enable(tx_handle_);
-    }
-
-    bool IsInitialized() const { return initialized_; }
-
-private:
-    i2s_chan_handle_t tx_handle_ = nullptr;
-    i2s_chan_handle_t rx_handle_ = nullptr;
-    bool initialized_ = false;
-};
+// ============ 外接音频(MAX98357A + INMP441, I2S1) ============
+// ExternalAudio 已移除 - 外接音频方案因 GPIO26-29 与 Octal PSRAM 冲突已放弃
+// 板载 ES8388 (I2S0) 提供音频功能
 
 // ============ 板型定义 ============
 class atk_dnesp32s3 : public WifiBoard {
 private:
-    i2c_master_bus_handle_t i2c_bus_;
+    i2c_master_bus_handle_t i2c_bus_;      // I2C0: 内部总线 (XL9555 + ES8388)
+    i2c_master_bus_handle_t i2c_bus_ext_;  // I2C1: 外部总线 (PCA9685 + VL53L0X)
     Button boot_button_;
     LcdDisplay* display_;
     XL9555* xl9555_;
     EspVideo* camera_;
     PCA9685* pca9685_;
     TB6612* motor_driver_;
-    ExternalAudio* external_audio_;
     PanTilt* pan_tilt_;
     WalleExpression* expression_;
     WalleEyes* eyes_;
@@ -1201,6 +1074,7 @@ private:
     PersonTracker* tracker_;
 
     void InitializeI2c() {
+        // I2C0 - 内部总线 (GPIO41/42, 板载走线): XL9555 (0x20) + ES8388 (0x10)
         i2c_master_bus_config_t i2c_bus_cfg = {
             .i2c_port = (i2c_port_t)I2C_NUM_0,
             .sda_io_num = AUDIO_CODEC_I2C_SDA_PIN,
@@ -1215,8 +1089,26 @@ private:
         };
         ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus_));
 
-        // Initialize XL9555（I2C 地址 0x20）
+        // Initialize XL9555(I2C 地址 0x20)
         xl9555_ = new XL9555(i2c_bus_, 0x20);
+
+        // I2C1 - 外部总线 (GPIO38/39, 与摄像头SCCB共享): PCA9685 (0x40) + VL53L0X (0x29) + OV2640 SCCB (0x3C)
+        // 摄像头驱动使用 init_sccb=false + i2c_handle 方式共享此总线
+        i2c_master_bus_config_t i2c_ext_cfg = {
+            .i2c_port = (i2c_port_t)EXTERNAL_I2C_PORT,
+            .sda_io_num = EXTERNAL_I2C_SDA_PIN,
+            .scl_io_num = EXTERNAL_I2C_SCL_PIN,
+            .clk_source = I2C_CLK_SRC_DEFAULT,
+            .glitch_ignore_cnt = 7,
+            .intr_priority = 0,
+            .trans_queue_depth = 0,
+            .flags = {
+                .enable_internal_pullup = 1,
+            },
+        };
+        ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_ext_cfg, &i2c_bus_ext_));
+        ESP_LOGI(TAG, "I2C1 external bus initialized: SDA=%d, SCL=%d (shared with camera SCCB)",
+                 EXTERNAL_I2C_SDA_PIN, EXTERNAL_I2C_SCL_PIN);
     }
 
     void InitializeSpi() {
@@ -1306,15 +1198,10 @@ private:
             .xclk_io = CAM_PIN_XCLK,
         };
 
-        esp_video_init_sccb_config_t sccb_config = {
-            .init_sccb = true,
-            .i2c_config = {
-                .port = 1,
-                .scl_pin = CAM_PIN_SIOC,
-                .sda_pin = CAM_PIN_SIOD,
-            },
-            .freq = 100000,
-        };
+        esp_video_init_sccb_config_t sccb_config = {};
+        sccb_config.init_sccb = false;       // 不让 esp_video 自己初始化 I2C，使用我们已创建的 i2c_bus_ext_
+        sccb_config.i2c_handle = i2c_bus_ext_; // 共享 I2C1 总线 (GPIO38/39)
+        sccb_config.freq = 100000;
 
         esp_video_init_dvp_config_t dvp_config = {
             .sccb_config = sccb_config,
@@ -1331,7 +1218,8 @@ private:
         camera_ = new EspVideo(video_config);
     }
 
-    /** 初始化 PCA9685 PWM 驱动板（fail-soft：未连接不崩溃） */
+    /** 初始化 PCA9685 PWM 驱动板(fail-soft:未连接不崩溃)
+     *  挂在外部 I2C1 总线 (GPIO43/44) */
     void InitializePCA9685() {
         // I2C probe: 确认 PCA9685 物理连接
         i2c_device_config_t dev_cfg = {
@@ -1340,19 +1228,19 @@ private:
             .scl_speed_hz = 100000,
         };
         i2c_master_dev_handle_t dev;
-        esp_err_t ret = i2c_master_bus_add_device(i2c_bus_, &dev_cfg, &dev);
+        esp_err_t ret = i2c_master_bus_add_device(i2c_bus_ext_, &dev_cfg, &dev);
         if (ret == ESP_OK) {
             uint8_t reg = 0x00, val = 0;
             ret = i2c_master_transmit_receive(dev, &reg, 1, &val, 1, 50);
             i2c_master_bus_rm_device(dev);
         }
         if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "PCA9685 not found at 0x%02X — servos/motors disabled", PCA9685_I2C_ADDR);
+            ESP_LOGW(TAG, "PCA9685 not found at 0x%02X - servos/motors disabled", PCA9685_I2C_ADDR);
             pca9685_ = nullptr;
             return;
         }
 
-        pca9685_ = new PCA9685(i2c_bus_, PCA9685_I2C_ADDR, PCA9685_SERVO_FREQ_HZ);
+        pca9685_ = new PCA9685(i2c_bus_ext_, PCA9685_I2C_ADDR, PCA9685_SERVO_FREQ_HZ);
         for (int i = 0; i < 16; i++) {
             pca9685_->SetDutyCycle(i, 0);
         }
@@ -1361,35 +1249,33 @@ private:
 
     /** 初始化 TB6612 电机驱动 */
     void InitializeMotor() {
+        // TB6612 方向引脚通过 XL9555 IO 扩展控制（不在P1排针上）
         TB6612::MotorPins motor_a = {
             .in1 = TB6612_AIN1_GPIO,
             .in2 = TB6612_AIN2_GPIO,
             .pca_channel = MOTOR_LEFT_PWM_CH,
+            .xl9555_in1_bit = TB6612_AIN1_XL9555_BIT,
+            .xl9555_in2_bit = TB6612_AIN2_XL9555_BIT,
         };
         TB6612::MotorPins motor_b = {
             .in1 = TB6612_BIN1_GPIO,
             .in2 = TB6612_BIN2_GPIO,
             .pca_channel = MOTOR_RIGHT_PWM_CH,
+            .xl9555_in1_bit = TB6612_BIN1_XL9555_BIT,
+            .xl9555_in2_bit = TB6612_BIN2_XL9555_BIT,
         };
 
         motor_driver_ = new TB6612(motor_a, motor_b);
-        ESP_LOGI(TAG, "TB6612 motor driver initialized");
+        // 注册 XL9555 回调：bit→level
+        motor_driver_->SetPinCallback([this](uint8_t bit, uint8_t level) {
+            if (xl9555_) {
+                xl9555_->SetOutputState(bit, level);
+            }
+        });
+        ESP_LOGI(TAG, "TB6612 motor driver initialized (XL9555 P00/P01/P06/P07)");
     }
 
-    /** 初始化外接音频（I2S1 MAX98357A + INMP441） */
-    void InitializeExternalAudio() {
-        auto* ext = new ExternalAudio();
-        if (ext->Initialize()) {
-            external_audio_ = ext;
-            ESP_LOGI(TAG, "ExternalAudio: MAX98357A+INMP441 on I2S1 ready");
-        } else {
-            delete ext;
-            external_audio_ = nullptr;
-            ESP_LOGW(TAG, "ExternalAudio: hardware not detected — skipping");
-        }
-    }
-
-    /** 初始化云台（PCA9685 模式） */
+    /** 初始化云台(PCA9685 模式) */
     void InitializePanTilt() {
         if (!pca9685_) {
             ESP_LOGW(TAG, "PanTilt: PCA9685 not available, skipping");
@@ -1422,22 +1308,22 @@ private:
         ESP_LOGI(TAG, "WALLE-Expression initialized");
     }
 
-    /** 初始化 WALL-E 眼睛 — 延迟到硬件就绪（阶段5），避免启动时消耗内存 */
+    /** 初始化 WALL-E 眼睛 - 延迟到硬件就绪(阶段5),避免启动时消耗内存 */
     void InitializeEyes() {
-        // GC9A01 双屏帧缓冲 230KB PSRAM + animation task 3KB 栈，
-        // 未连接时完全不分配，保证 WiFi / 语音等核心功能有足够内存
-        ESP_LOGI(TAG, "WALLE-Eyes deferred (GC9A01 Stage5) — call walle_eyes_start after connecting screens");
+        // GC9A01 双屏帧缓冲 230KB PSRAM + animation task 3KB 栈,
+        // 未连接时完全不分配,保证 WiFi / 语音等核心功能有足够内存
+        ESP_LOGI(TAG, "WALLE-Eyes deferred (GC9A01 Stage5) - call walle_eyes_start after connecting screens");
         eyes_ = nullptr;
     }
 
-    // StartEyes() moved to public section — see below
+    // StartEyes() moved to public section - see below
 
-    /** 初始化 VL53L0X 激光测距传感器 */
+    /** 初始化 VL53L0X 激光测距传感器(挂在外部 I2C1 总线) */
     void InitializeToF() {
-        tof_ = new VL53L0X(i2c_bus_, VL53L0X_I2C_ADDR);
+        tof_ = new VL53L0X(i2c_bus_ext_, VL53L0X_I2C_ADDR);
         bool ok = tof_->Init();
         if (!ok) {
-            ESP_LOGW(TAG, "VL53L0X init failed — distance tracking disabled, falling back to visual-only");
+            ESP_LOGW(TAG, "VL53L0X init failed - distance tracking disabled, falling back to visual-only");
         }
     }
 
@@ -1453,11 +1339,11 @@ private:
         ESP_LOGI(TAG, "PersonTracker initialized (ToF=%s)", tof_ok ? "YES" : "NO");
     }
 
-    /** 注册 MCP 工具，支持语音控制 */
+    /** 注册 MCP 工具,支持语音控制 */
     void InitializeTools() {
         auto& mcp = McpServer::GetInstance();
 
-        // ============ 底盘控制（4个） ============
+        // ============ 底盘控制(4个) ============
 
         mcp.AddTool("self.chassis.go_forward",
             "WALL-E前进",
@@ -1505,10 +1391,10 @@ private:
                 return true;
             });
 
-        // ============ 追踪控制（3个） ============
+        // ============ 追踪控制(3个) ============
 
         mcp.AddTool("self.tracker.start",
-            "开始追踪人物。WALL-E会跟着人走，找不到人时自动扫描搜索。",
+            "开始追踪人物。WALL-E会跟着人走,找不到人时自动扫描搜索。",
             PropertyList(),
             [this](const PropertyList& props) -> ReturnValue {
                 tracker_->StartTracking(2000);
@@ -1517,7 +1403,7 @@ private:
             });
 
         mcp.AddTool("self.tracker.stop",
-            "停止追踪人物。云台回到居中位置，底盘停止。",
+            "停止追踪人物。云台回到居中位置,底盘停止。",
             PropertyList(),
             [this](const PropertyList& props) -> ReturnValue {
                 tracker_->StopTracking();
@@ -1530,7 +1416,7 @@ private:
             });
 
         mcp.AddTool("self.tracker.check",
-            "拍照检查当前画面中是否有人，返回人物位置和距离信息。",
+            "拍照检查当前画面中是否有人,返回人物位置和距离信息。",
             PropertyList(),
             [this](const PropertyList& props) -> ReturnValue {
                 bool found = tracker_->TrackOnce();
@@ -1544,10 +1430,10 @@ private:
                 return json;
             });
 
-        // ============ 云台控制（3个） ============
+        // ============ 云台控制(3个) ============
 
         mcp.AddTool("self.head.look_at",
-            "控制WALL-E头部看向指定方向。pan控制脖子左右（0=最左，90=正中，180=最右），tilt控制头上下（45=最低，90=正中，135=最高）。",
+            "控制WALL-E头部看向指定方向。pan控制脖子左右(0=最左,90=正中,180=最右),tilt控制头上下(45=最低,90=正中,135=最高)。",
             PropertyList({
                 Property("pan", kPropertyTypeInteger, 90, (int)NECK_LR_MIN, (int)NECK_LR_MAX),
                 Property("tilt", kPropertyTypeInteger, 90, (int)HEAD_UD_MIN, (int)HEAD_UD_MAX)
@@ -1575,10 +1461,10 @@ private:
                 return true;
             });
 
-        // ============ 表情/手臂控制（2个） ============
+        // ============ 表情/手臂控制(2个) ============
 
         mcp.AddTool("self.expression.set",
-            "设置WALL-E的表情。0=中性，1=开心（双臂举起），2=难过（双臂下垂），3=好奇（左臂微抬），4=害怕（双臂高举），5=挥手。",
+            "设置WALL-E的表情。0=中性,1=开心(双臂举起),2=难过(双臂下垂),3=好奇(左臂微抬),4=害怕(双臂高举),5=挥手。",
             PropertyList({
                 Property("expression", kPropertyTypeInteger, 0, 0, 5)
             }),
@@ -1596,10 +1482,10 @@ private:
                 return true;
             });
 
-        // ============ 眼睛屏控制（5个） ============
+        // ============ 眼睛屏控制(5个) ============
 
         mcp.AddTool("self.eyes.start",
-            "启动WALL-E眼睛屏（GC9A01 240x240 TFT）。仅在屏幕已物理连接后调用，启动后会分配帧缓冲并开始渲染瞳孔动画。5阶段调试：阶段5使用。",
+            "启动WALL-E眼睛屏(GC9A01 240x240 TFT)。仅在屏幕已物理连接后调用,启动后会分配帧缓冲并开始渲染瞳孔动画。5阶段调试:阶段5使用。",
             PropertyList(),
             [this](const PropertyList& props) -> ReturnValue {
                 if (eyes_) { ESP_LOGW(TAG, "Eyes already started"); return true; }
@@ -1610,7 +1496,7 @@ private:
             });
 
         mcp.AddTool("self.eyes.set_mode",
-            "设置WALL-E眼睛模式。0=关闭，1=常亮，2=呼吸，3=眨眼，4=生气，5=困倦。需要先调用 self.eyes.start 启动眼睛屏。",
+            "设置WALL-E眼睛模式。0=关闭,1=常亮,2=呼吸,3=眨眼,4=生气,5=困倦。需要先调用 self.eyes.start 启动眼睛屏。",
             PropertyList({
                 Property("mode", kPropertyTypeInteger, 1, 0, 5)
             }),
@@ -1622,7 +1508,7 @@ private:
             });
 
         mcp.AddTool("self.eyes.set_brightness",
-            "设置WALL-E眼睛亮度。0=最暗，100=最亮。需要先调用 self.eyes.start。",
+            "设置WALL-E眼睛亮度。0=最暗,100=最亮。需要先调用 self.eyes.start。",
             PropertyList({
                 Property("brightness", kPropertyTypeInteger, 60, 0, 100)
             }),
@@ -1634,7 +1520,7 @@ private:
             });
 
         mcp.AddTool("self.eyes.set_color",
-            "设置WALL-E眼睛颜色。RGB格式，每个通道0-255。默认暖黄色(255,200,80)。需要先调用 self.eyes.start。",
+            "设置WALL-E眼睛颜色。RGB格式,每个通道0-255。默认暖黄色(255,200,80)。需要先调用 self.eyes.start。",
             PropertyList({
                 Property("r", kPropertyTypeInteger, 255, 0, 255),
                 Property("g", kPropertyTypeInteger, 200, 0, 255),
@@ -1669,7 +1555,6 @@ public:
         , camera_(nullptr)
         , pca9685_(nullptr)
         , motor_driver_(nullptr)
-        , external_audio_(nullptr)
         , pan_tilt_(nullptr)
         , expression_(nullptr)
         , eyes_(nullptr)
@@ -1680,7 +1565,6 @@ public:
         InitializeSpi();
         InitializeSt7789Display();
         InitializeButtons();
-        InitializeExternalAudio();  // fail-soft，硬件未接也不崩溃
         InitializeCamera();
         InitializePCA9685();
         InitializeMotor();
@@ -1690,6 +1574,17 @@ public:
         InitializeToF();
         InitializeTracker();
         InitializeTools();
+
+    }
+
+    virtual void OnNetworkEvent(NetworkEvent event, const std::string& data) override {
+        // 先调用父类处理（WiFi 事件分发、application 回调等）
+        WifiBoard::OnNetworkEvent(event, data);
+        // WiFi 连接成功后启动 Web 调试服务器
+        if (event == NetworkEvent::Connected) {
+            ESP_LOGI("WALLE", "Network connected, starting debug server...");
+            walle_debug_server_start();
+        }
     }
 
     virtual Led* GetLed() override {
@@ -1725,7 +1620,7 @@ public:
     // ============ WALL-E 公共访问接口 ============
     WalleEyes* GetWalleEyes() { return eyes_; }
 
-    /** 启动眼睛屏（5阶段调试：阶段5）— 仅在 GC9A01 物理连接后调用 */
+    /** 启动眼睛屏(5阶段调试:阶段5)- 仅在 GC9A01 物理连接后调用 */
     void StartEyes() {
         if (eyes_) {
             ESP_LOGW(TAG, "Eyes already started");
@@ -1739,13 +1634,13 @@ public:
     PCA9685* GetPca9685() { return pca9685_; }
     PanTilt* GetPanTilt() { return pan_tilt_; }
     TB6612* GetMotorDriver() { return motor_driver_; }
-    ExternalAudio* GetExternalAudio() { return external_audio_; }
     WalleExpression* GetWalleExpression() { return expression_; }
     VL53L0X* GetVl53l0x() { return tof_; }
     i2c_master_bus_handle_t GetI2cBus() { return i2c_bus_; }
+    i2c_master_bus_handle_t GetI2cBusExt() { return i2c_bus_ext_; }
 };
 
-// ============ WALL-E C 包装函数（供 walle_debug_server.cc 调用）============
+// ============ WALL-E C 包装函数(供 walle_debug_server.cc 调用)============
 #include "boards/common/board.h"
 
 extern "C" {
@@ -1791,14 +1686,14 @@ extern "C" {
         else if (strcmp(mode_str, "angry") == 0)   eyes->SetMode(Gc9a01Eyes::kAngry);
         else if (strcmp(mode_str, "sleepy") == 0)  eyes->SetMode(Gc9a01Eyes::kSleepy);
     }
-    
-    // 延迟启动眼睛屏（连接 GC9A01 后调用，通过 MCP/debug API）
+
+    // 延迟启动眼睛屏(连接 GC9A01 后调用,通过 MCP/debug API)
     void walle_eyes_start() {
         auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
         board->StartEyes();
     }
-    
-    // 表情控制（直接调用 PCA9685）
+
+    // 表情控制(直接调用 PCA9685)
     void walle_expression_playHappy() {
         auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
         auto* expr = board->GetWalleExpression();
@@ -1833,8 +1728,8 @@ extern "C" {
         auto* expr = board->GetWalleExpression();
         if (expr) expr->SetExpression(WalleExpression::kWave);
     }
-    
-    // 舵机控制（9个舵机：CH0-CH8）
+
+    // 舵机控制(9个舵机:CH0-CH8)
     void walle_servo_setAngle(int channel, int angle) {
         auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
         auto* pca = board->GetPca9685();
@@ -1842,8 +1737,8 @@ extern "C" {
             pca->SetServoAngle(channel, angle);
         }
     }
-    
-    // 电机控制（速度 -255~255）
+
+    // 电机控制(速度 -255~255)
     void walle_motor_setSpeed(int left, int right) {
         auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
         auto* motor = board->GetMotorDriver();
@@ -1853,7 +1748,7 @@ extern "C" {
             motor->SetMotorB(pca, right / 255.0f);
         }
     }
-    
+
     // 急停
     void walle_emergency_stop() {
         auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
@@ -1861,101 +1756,85 @@ extern "C" {
         auto* pca = board->GetPca9685();
         if (motor && pca) { motor->SetMotorA(pca, 0); motor->SetMotorB(pca, 0); }
     }
-    
-    // 读取距离（毫米）
+
+    // 读取距离(毫米)
     uint16_t walle_vl53l0x_readRange() {
         auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
         auto* tof = board->GetVl53l0x();
         if (tof) return (uint16_t)tof->ReadDistanceMm();
         return 0;
     }
-    
-    // ============ 外接音频（MAX98357A + INMP441, I2S1）============
-    
-    bool walle_external_audio_ready() {
-        auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
-        auto* audio = board->GetExternalAudio();
-        return audio && audio->IsInitialized();
-    }
-    
-    // 播放 PCM 音频数据（16bit, single channel, sample_rate=EXTERNAL_AUDIO_SAMPLE_RATE）
-    bool walle_external_audio_play(const int16_t* samples, int count) {
-        auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
-        auto* audio = board->GetExternalAudio();
-        if (!audio || !audio->IsInitialized()) return false;
-        return audio->Play(samples, count);
-    }
-    
-    // 从 INMP441 录音
-    int walle_external_audio_record(int16_t* buffer, int max_samples, uint32_t timeout_ms) {
-        auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
-        auto* audio = board->GetExternalAudio();
-        if (!audio || !audio->IsInitialized()) return 0;
-        return audio->Record(buffer, max_samples, timeout_ms);
-    }
-    
-    // 播放蜂鸣音效（方波，频率Hz，时长ms）
-    void walle_external_audio_beep(int freq_hz, int duration_ms) {
-        auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
-        auto* audio = board->GetExternalAudio();
-        if (!audio || !audio->IsInitialized()) return;
-        
-        int sample_rate = EXTERNAL_AUDIO_SAMPLE_RATE;
-        int total_samples = sample_rate * duration_ms / 1000;
-        int period_samples = sample_rate / freq_hz;
-        if (period_samples < 2) period_samples = 2;
-        
-        // 预生成一个周期
-        std::vector<int16_t> wave(period_samples);
-        for (int i = 0; i < period_samples; i++) {
-            wave[i] = (i < period_samples / 2) ? 12000 : -12000;
-        }
-        
-        // 循环播放
-        int remaining = total_samples;
-        while (remaining > 0) {
-            int chunk = (remaining > period_samples) ? period_samples : remaining;
-            audio->Play(wave.data(), chunk);
-            remaining -= chunk;
-        }
-    }
-    
+
     // 系统重启
     void walle_system_restart() {
         esp_restart();
     }
-    
-    // I²C 总线扫描（通过临时设备探测，返回 JSON 设备地址列表）
+
+    // I2C 总线扫描(扫描两条 I2C 总线,返回 JSON 设备地址列表)
     char* walle_i2c_scan_json() {
-        static char result[2048];
+        static char result[4096];
         result[0] = '\0';
         auto* board = static_cast<atk_dnesp32s3*>(&Board::GetInstance());
-        auto* bus = board->GetI2cBus();
-        if (!bus) { snprintf(result, sizeof(result), "{\"error\":\"no i2c bus\"}"); return result; }
-        
+
         char* p = result;
-        p += snprintf(p, sizeof(result) - (p - result), "{\"devices\":[");
-        bool first = true;
-        for (int addr = 1; addr < 127; addr++) {
-            i2c_device_config_t dev_cfg = {
-                .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-                .device_address = (uint8_t)addr,
-                .scl_speed_hz = 100000,
-            };
-            i2c_master_dev_handle_t dev = nullptr;
-            esp_err_t ret = i2c_master_bus_add_device(bus, &dev_cfg, &dev);
-            if (ret == ESP_OK && dev) {
-                uint8_t dummy[1] = {0};
-                ret = i2c_master_transmit_receive(dev, dummy, 0, dummy, 0, 10);
-                i2c_master_bus_rm_device(dev);
-                if (ret == ESP_OK) {
-                    if (!first) *p++ = ',';
-                    p += snprintf(p, sizeof(result) - (p - result), "\"0x%02X\"", addr);
-                    first = false;
+        p += snprintf(p, sizeof(result) - (p - result), "{");
+
+        // 扫描 I2C0 (内部总线)
+        auto* bus0 = board->GetI2cBus();
+        if (bus0) {
+            p += snprintf(p, sizeof(result) - (p - result), "\"i2c0\":[");
+            bool first = true;
+            for (int addr = 1; addr < 127; addr++) {
+                i2c_device_config_t dev_cfg = {
+                    .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+                    .device_address = (uint8_t)addr,
+                    .scl_speed_hz = 100000,
+                };
+                i2c_master_dev_handle_t dev = nullptr;
+                esp_err_t ret = i2c_master_bus_add_device(bus0, &dev_cfg, &dev);
+                if (ret == ESP_OK && dev) {
+                    uint8_t dummy[1] = {0};
+                    ret = i2c_master_transmit_receive(dev, dummy, 0, dummy, 0, 10);
+                    i2c_master_bus_rm_device(dev);
+                    if (ret == ESP_OK) {
+                        if (!first) *p++ = ',';
+                        p += snprintf(p, sizeof(result) - (p - result), "\"0x%02X\"", addr);
+                        first = false;
+                    }
                 }
             }
+            p += snprintf(p, sizeof(result) - (p - result), "]");
         }
-        p += snprintf(p, sizeof(result) - (p - result), "]}");
+
+        // 扫描 I2C1 (外部总线)
+        auto* bus1 = board->GetI2cBusExt();
+        if (bus1) {
+            if (bus0) p += snprintf(p, sizeof(result) - (p - result), ",");
+            p += snprintf(p, sizeof(result) - (p - result), "\"i2c1\":[");
+            bool first = true;
+            for (int addr = 1; addr < 127; addr++) {
+                i2c_device_config_t dev_cfg = {
+                    .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+                    .device_address = (uint8_t)addr,
+                    .scl_speed_hz = 100000,
+                };
+                i2c_master_dev_handle_t dev = nullptr;
+                esp_err_t ret = i2c_master_bus_add_device(bus1, &dev_cfg, &dev);
+                if (ret == ESP_OK && dev) {
+                    uint8_t dummy[1] = {0};
+                    ret = i2c_master_transmit_receive(dev, dummy, 0, dummy, 0, 10);
+                    i2c_master_bus_rm_device(dev);
+                    if (ret == ESP_OK) {
+                        if (!first) *p++ = ',';
+                        p += snprintf(p, sizeof(result) - (p - result), "\"0x%02X\"", addr);
+                        first = false;
+                    }
+                }
+            }
+            p += snprintf(p, sizeof(result) - (p - result), "]");
+        }
+
+        p += snprintf(p, sizeof(result) - (p - result), "}");
         return result;
     }
 }

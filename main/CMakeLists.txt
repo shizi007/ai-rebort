@@ -41,7 +41,7 @@ set(SOURCES "audio/audio_codec.cc"
             )
 
 # walle_debug_server 仅用于 WALL-E 板型（依赖机器人硬件函数）
-if(CONFIG_BOARD_TYPE_ATK_DNESP32S3_WALLE)
+if(CONFIG_BOARD_TYPE_ATK_DNESP32S3)
     list(APPEND SOURCES "walle_debug_server.cc")
 endif()
 

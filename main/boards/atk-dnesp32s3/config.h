@@ -3,6 +3,17 @@
 
 #include <driver/gpio.h>
 
+// ============ 外部 I2C 总线（PCA9685 + VL53L0X + OV2640 SCCB 共享） ============
+// GPIO41/42 为内部 I2C0（XL9555+ES8388），未引出到排针
+// GPIO26-37 被 Octal PSRAM/Flash 占用，绝对不可用！
+// 使用 I2C1 + GPIO38/39 作为外部 I2C 总线
+// 摄像头 SCCB 也使用 GPIO38/39 (CAM_PIN_SIOC/SIOD)
+// I2C 总线设备地址无冲突：OV2640 SCCB=0x3C, PCA9685=0x40, VL53L0X=0x29
+// 注意：PCA9685 和 VL53L0X 的 SDA/SCL 需物理连到 GPIO38/39 排针
+#define EXTERNAL_I2C_SDA_PIN    GPIO_NUM_39
+#define EXTERNAL_I2C_SCL_PIN    GPIO_NUM_38
+#define EXTERNAL_I2C_PORT       I2C_NUM_1
+
 // ============ 板载音频（ES8388 codec, I2S0） ============
 #define AUDIO_INPUT_SAMPLE_RATE      24000
 #define AUDIO_OUTPUT_SAMPLE_RATE     24000
@@ -19,7 +30,7 @@
 
 // ============ 按键/LED ============
 #define BOOT_BUTTON_GPIO  GPIO_NUM_0
-#define BUILTIN_LED_GPIO  GPIO_NUM_NC  // GPIO1 已给 GC9A01 CS_RIGHT 用
+#define BUILTIN_LED_GPIO  GPIO_NUM_NC  // GPIO4 为板载LED但被CAM D0占用
 
 // ============ LCD 显示（ST7789 SPI） ============
 #define LCD_SCLK_PIN GPIO_NUM_12
@@ -92,10 +103,12 @@
 
 // ============ GC9A01 圆形屏眼睛（共享主屏 SPI 总线，7针无BL） ============
 // 复用 LCD 的 SCLK(GPIO12) / MOSI(GPIO11) / DC(GPIO40)
-// 仅需两个独立 CS 引脚
-#define EYE_SPI_HOST       SPI2_HOST
-#define EYE_CS_LEFT        GPIO_NUM_44
-#define EYE_CS_RIGHT       GPIO_NUM_1
+// CS 由 XL9555 IO 扩展芯片控制（释放 GPIO1+GPIO44，避免 UART0 冲突）
+#define EYE_SPI_HOST           SPI2_HOST
+#define EYE_CS_LEFT            GPIO_NUM_NC   // 已迁移至 XL9555 P02
+#define EYE_CS_RIGHT           GPIO_NUM_NC   // 已迁移至 XL9555 P03
+#define WALLE_EYE_CS_L_XL9555  2             // XL9555 P02 → GC9A01 CS LEFT
+#define WALLE_EYE_CS_R_XL9555  3             // XL9555 P03 → GC9A01 CS RIGHT
 #define EYE_RESOLUTION     240
 #define EYE_PCLK_HZ        (40 * 1000 * 1000)
 
@@ -108,16 +121,6 @@
 #define TRACK_TOO_CLOSE_MM         400.0f
 #define TRACK_TOO_FAR_MM           1500.0f
 
-// ============ 外接音频（I2S1, MAX98357A 功放喇叭 + INMP441 MEMS 麦克风） ============
-// 共享 BCLK / WS，独立数据线
-// MAX98357A: BCLK, LRCLK(WS), DIN → 喇叭（无需 MCLK，内部 PLL）
-// INMP441:   SCK(BCLK), WS, SD(DOUT) → ESP32-S3 DIN（无需 MCLK）
-// ESP32-S3 I2S1 控制器，Master 模式
-#define EXTERNAL_AUDIO_I2S_BCLK  GPIO_NUM_26
-#define EXTERNAL_AUDIO_I2S_WS    GPIO_NUM_27
-#define EXTERNAL_AUDIO_I2S_DOUT  GPIO_NUM_28  // ESP→MAX98357A DIN
-#define EXTERNAL_AUDIO_I2S_DIN   GPIO_NUM_29  // INMP441 DOUT→ESP
-#define EXTERNAL_AUDIO_SAMPLE_RATE  24000
 
 // ============ 眼睛渲染参数 ============
 #define EYE_IRIS_RADIUS         50
@@ -128,10 +131,16 @@
 #define EYE_LID_COLOR_B         20
 
 // ============ TB6612 电机驱动引脚 ============
-#define TB6612_AIN1_GPIO    GPIO_NUM_2
-#define TB6612_AIN2_GPIO    GPIO_NUM_8
-#define TB6612_BIN1_GPIO    GPIO_NUM_19
-#define TB6612_BIN2_GPIO    GPIO_NUM_20
+// 方向引脚通过 XL9555 IO 扩展芯片控制（GPIO2/8/19/20 不在排针上或需保留）
+// GPIO_NUM_NC 表示使用 XL9555 回调，不直连 GPIO
+#define TB6612_AIN1_GPIO    GPIO_NUM_NC  // XL9555 P00
+#define TB6612_AIN2_GPIO    GPIO_NUM_NC  // XL9555 P01
+#define TB6612_BIN1_GPIO    GPIO_NUM_NC  // XL9555 P06
+#define TB6612_BIN2_GPIO    GPIO_NUM_NC  // XL9555 P07
+#define TB6612_AIN1_XL9555_BIT  0        // XL9555 P00
+#define TB6612_AIN2_XL9555_BIT  1        // XL9555 P01
+#define TB6612_BIN1_XL9555_BIT  6        // XL9555 P06
+#define TB6612_BIN2_XL9555_BIT  7        // XL9555 P07
 
 // ============ 各舵机角度范围 ============
 
