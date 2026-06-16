@@ -13,7 +13,7 @@
  *   - 电源:12V输入→DC-DC 10-36V降压模块→5V全系统供电
  *   - 17 个 MCP 工具,支持语音控制
  *
- * 硬件:ATK-DNESP32S3 + OV2640 + PCA9685 + TB6612 + VL53L0X + NS4150 + SG90×9 + JGB37-520×2 + 喇叭 + GC9A01×2
+ * 硬件:ATK-DNESP32S3 + ESP32-CAM子板(UART2) + PCA9685 + TB6612 + VL53L0X + NS4150 + SG90×9 + JGB37-520×2 + 喇叭 + GC9A01×2
  *
  * 舵机接线(PCA9685):
  *   CH0 - 左眼
@@ -26,17 +26,22 @@
  *   CH7 - 左眉毛 (L_BROW)
  *   CH8 - 右眉毛 (R_BROW)
  *
- * 电机接线(TB6612):
- *   AIN1=XL9555 P00, AIN2=XL9555 P01, PWMA=PCA9685_CH9(左电机)
- *   BIN1=XL9555 P06, BIN2=XL9555 P07, PWMB=PCA9685_CH10(右电机)
+ * 电机接线(TB6612,直连 P1 排针):
+ *   AIN1=GPIO4, AIN2=GPIO5, PWMA=PCA9685_CH9(左电机)
+ *   BIN1=GPIO6, BIN2=GPIO7, PWMB=PCA9685_CH10(右电机)
  *
  * 眼睛接线(GC9A01 7针,共享主屏 SPI 总线):
  *   SCLK/MOSI/DC 复用于主屏(GPIO12/11/40),CS_LEFT=XL9555 P02, CS_RIGHT=XL9555 P03
  *   RST=RC上电复位(10K→3.3V+100nF→GND), BL=3.3V常亮
  *
- * 外部 I2C 总线(GPIO38/39,与摄像头SCCB共享):
- *   PCA9685 (0x40) + VL53L0X (0x29) + OV2640 SCCB (0x3C)
- *   PCA9685 和 VL53L0X 的 SDA/SCL 需物理连到 GPIO38/39 排针
+ * 摄像头(ESP32-CAM子板,通过UART2连接):
+ *   主板 TX=GPIO16 → ESP32-CAM RX
+ *   主板 RX=GPIO17 ← ESP32-CAM TX
+ *   波特率 921600, JPEG 帧格式传输
+ *
+ * 外部 I2C 总线(GPIO38/39,独享):
+ *   PCA9685 (0x40) + VL53L0X (0x29)
+ *   PCA9685 和 VL53L0X 的 SDA/SCL 连到 GPIO38/39 排针
  *
  * 喇叭接线:
  *   ES8388 OUT2 → NS4150 功放 → 喇叭(8Ω 1W)
@@ -53,7 +58,7 @@
 #include "config.h"
 #include "i2c_device.h"
 #include "led/single_led.h"
-#include "esp_video.h"
+#include "uart_camera.h"
 #include "pan_tilt.h"
 #include "pca9685.h"
 #include "tb6612.h"
@@ -81,8 +86,8 @@ class XL9555 : public I2cDevice {
 public:
     XL9555(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : I2cDevice(i2c_bus, addr) {
         // 端口0方向寄存器(0x06): 0=输出, 1=输入
-        // P00=AIN1(出), P01=AIN2(出), P02=CS_L(出), P03=CS_R(出),
-        // P04=CAM_PWDN(出), P05=CAM_RESET(出), P06=BIN1(出), P07=BIN2(出)
+        // P02=CS_L(出), P03=CS_R(出), P04-P05=保留(出), P00/P01/P06/P07=空闲(出)
+        // 注意：P00/P01/P06/P07 不再用于 TB6612（已改 GPIO 直连）
         WriteReg(0x06, 0x00);  // P00-P07 全部输出
         // 端口1方向寄存器(0x07): P08=LCD_BL(出), P09-P11=保留(出), P12-P15=输入
         WriteReg(0x07, 0xF0);
@@ -1064,7 +1069,7 @@ private:
     Button boot_button_;
     LcdDisplay* display_;
     XL9555* xl9555_;
-    EspVideo* camera_;
+    UartCamera* camera_;
     PCA9685* pca9685_;
     TB6612* motor_driver_;
     PanTilt* pan_tilt_;
@@ -1092,8 +1097,8 @@ private:
         // Initialize XL9555(I2C 地址 0x20)
         xl9555_ = new XL9555(i2c_bus_, 0x20);
 
-        // I2C1 - 外部总线 (GPIO38/39, 与摄像头SCCB共享): PCA9685 (0x40) + VL53L0X (0x29) + OV2640 SCCB (0x3C)
-        // 摄像头驱动使用 init_sccb=false + i2c_handle 方式共享此总线
+        // I2C1 - 外部总线 (GPIO38/39, P1排针): PCA9685 (0x40) + VL53L0X (0x29)
+        // 摄像头已外置 ESP32-CAM 子板，I2C1 不再与 SCCB 共享
         i2c_master_bus_config_t i2c_ext_cfg = {
             .i2c_port = (i2c_port_t)EXTERNAL_I2C_PORT,
             .sda_io_num = EXTERNAL_I2C_SDA_PIN,
@@ -1107,7 +1112,7 @@ private:
             },
         };
         ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_ext_cfg, &i2c_bus_ext_));
-        ESP_LOGI(TAG, "I2C1 external bus initialized: SDA=%d, SCL=%d (shared with camera SCCB)",
+        ESP_LOGI(TAG, "I2C1 external bus initialized: SDA=%d, SCL=%d (PCA9685 + VL53L0X)",
                  EXTERNAL_I2C_SDA_PIN, EXTERNAL_I2C_SCL_PIN);
     }
 
@@ -1169,53 +1174,24 @@ private:
     }
 
     void InitializeCamera() {
-        if (!xl9555_) {
-            ESP_LOGW(TAG, "Camera: XL9555 not available, skipping");
-            camera_ = nullptr;
+        // ESP32-CAM 子板通过 UART2 连接，不再使用 DVP 接口
+        UartCamera::Config cam_cfg;
+        cam_cfg.uart_port = UART_CAM_PORT;
+        cam_cfg.tx_pin = UART_CAM_TX_PIN;    // GPIO16
+        cam_cfg.rx_pin = UART_CAM_RX_PIN;    // GPIO17
+        cam_cfg.baud_rate = UART_CAM_BAUD;   // 921600
+        cam_cfg.capture_timeout_ms = 5000;
+
+        camera_ = new UartCamera(cam_cfg);
+        if (!camera_) {
+            ESP_LOGE(TAG, "UartCamera allocation failed");
             return;
         }
-        xl9555_->SetOutputState(OV_PWDN_IO, 0);
-        xl9555_->SetOutputState(OV_RESET_IO, 0);
-        vTaskDelay(pdMS_TO_TICKS(50));
-        xl9555_->SetOutputState(OV_RESET_IO, 1);
-        vTaskDelay(pdMS_TO_TICKS(50));
 
-        static esp_cam_ctlr_dvp_pin_config_t dvp_pin_config = {
-            .data_width = CAM_CTLR_DATA_WIDTH_8,
-            .data_io = {
-                [0] = CAM_PIN_D0,
-                [1] = CAM_PIN_D1,
-                [2] = CAM_PIN_D2,
-                [3] = CAM_PIN_D3,
-                [4] = CAM_PIN_D4,
-                [5] = CAM_PIN_D5,
-                [6] = CAM_PIN_D6,
-                [7] = CAM_PIN_D7,
-            },
-            .vsync_io = CAM_PIN_VSYNC,
-            .de_io = CAM_PIN_HREF,
-            .pclk_io = CAM_PIN_PCLK,
-            .xclk_io = CAM_PIN_XCLK,
-        };
-
-        esp_video_init_sccb_config_t sccb_config = {};
-        sccb_config.init_sccb = false;       // 不让 esp_video 自己初始化 I2C，使用我们已创建的 i2c_bus_ext_
-        sccb_config.i2c_handle = i2c_bus_ext_; // 共享 I2C1 总线 (GPIO38/39)
-        sccb_config.freq = 100000;
-
-        esp_video_init_dvp_config_t dvp_config = {
-            .sccb_config = sccb_config,
-            .reset_pin = CAM_PIN_RESET,
-            .pwdn_pin = CAM_PIN_PWDN,
-            .dvp_pin = dvp_pin_config,
-            .xclk_freq = 20000000,
-        };
-
-        esp_video_init_config_t video_config = {
-            .dvp = &dvp_config,
-        };
-
-        camera_ = new EspVideo(video_config);
+        // 测试连接：发送一个镜像设置命令
+        camera_->SetHMirror(false);
+        ESP_LOGI(TAG, "UartCamera initialized: UART%d TX=%d RX=%d @ %d baud",
+                 UART_CAM_PORT, UART_CAM_TX_PIN, UART_CAM_RX_PIN, UART_CAM_BAUD);
     }
 
     /** 初始化 PCA9685 PWM 驱动板(fail-soft:未连接不崩溃)
@@ -1249,30 +1225,26 @@ private:
 
     /** 初始化 TB6612 电机驱动 */
     void InitializeMotor() {
-        // TB6612 方向引脚通过 XL9555 IO 扩展控制（不在P1排针上）
+        // TB6612 方向引脚直连 P1 排针 GPIO4/5/6/7（摄像头外置后释放）
         TB6612::MotorPins motor_a = {
-            .in1 = TB6612_AIN1_GPIO,
-            .in2 = TB6612_AIN2_GPIO,
+            .in1 = TB6612_AIN1_GPIO,   // GPIO4
+            .in2 = TB6612_AIN2_GPIO,   // GPIO5
             .pca_channel = MOTOR_LEFT_PWM_CH,
-            .xl9555_in1_bit = TB6612_AIN1_XL9555_BIT,
+            .xl9555_in1_bit = TB6612_AIN1_XL9555_BIT,  // 0xFF = 不使用
             .xl9555_in2_bit = TB6612_AIN2_XL9555_BIT,
         };
         TB6612::MotorPins motor_b = {
-            .in1 = TB6612_BIN1_GPIO,
-            .in2 = TB6612_BIN2_GPIO,
+            .in1 = TB6612_BIN1_GPIO,   // GPIO6
+            .in2 = TB6612_BIN2_GPIO,   // GPIO7
             .pca_channel = MOTOR_RIGHT_PWM_CH,
             .xl9555_in1_bit = TB6612_BIN1_XL9555_BIT,
             .xl9555_in2_bit = TB6612_BIN2_XL9555_BIT,
         };
 
         motor_driver_ = new TB6612(motor_a, motor_b);
-        // 注册 XL9555 回调：bit→level
-        motor_driver_->SetPinCallback([this](uint8_t bit, uint8_t level) {
-            if (xl9555_) {
-                xl9555_->SetOutputState(bit, level);
-            }
-        });
-        ESP_LOGI(TAG, "TB6612 motor driver initialized (XL9555 P00/P01/P06/P07)");
+        // GPIO 直连模式，无需 XL9555 回调
+        ESP_LOGI(TAG, "TB6612 motor driver initialized (GPIO%d/%d/%d/%d direct)",
+                 TB6612_AIN1_GPIO, TB6612_AIN2_GPIO, TB6612_BIN1_GPIO, TB6612_BIN2_GPIO);
     }
 
     /** 初始化云台(PCA9685 模式) */

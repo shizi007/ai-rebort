@@ -1022,6 +1022,11 @@ if(CONFIG_IDF_TARGET_ESP32S3)
     list(APPEND SOURCES "boards/common/esp32_camera.cc")
 endif()
 
+# Include UartCamera for WALL-E board (UART-connected ESP32-CAM slave)
+if(CONFIG_BOARD_TYPE_ATK_DNESP32S3)
+    list(APPEND SOURCES "boards/common/uart_camera.cc")
+endif()
+
 set(MAIN_PRIV_REQUIRES_EXTRA "")
 if(CONFIG_BOARD_TYPE_ESP_VOCAT)
     list(APPEND MAIN_PRIV_REQUIRES_EXTRA
