@@ -130,7 +130,11 @@ static esp_err_t status_handler(httpd_req_t *req) {
         temperature_sensor_install(&temp_config, &temp_handle);
     }
     float cpu_temp = 0;
-    if (temp_handle) temperature_sensor_get_celsius(temp_handle, &cpu_temp);
+    if (temp_handle) {
+        temperature_sensor_enable(temp_handle);
+        temperature_sensor_get_celsius(temp_handle, &cpu_temp);
+        temperature_sensor_disable(temp_handle);
+    }
     cJSON_AddNumberToObject(root, "cpu_temp", cpu_temp);
 #else
     cJSON_AddNumberToObject(root, "cpu_temp", 0);

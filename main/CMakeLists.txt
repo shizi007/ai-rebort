@@ -1025,6 +1025,7 @@ endif()
 # Include UartCamera for WALL-E board (UART-connected ESP32-CAM slave)
 if(CONFIG_BOARD_TYPE_ATK_DNESP32S3)
     list(APPEND SOURCES "boards/common/uart_camera.cc")
+    list(APPEND SOURCES "boards/atk-dnesp32s3/external_audio.cc")
 endif()
 
 set(MAIN_PRIV_REQUIRES_EXTRA "")
